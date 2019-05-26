@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::error::Error;
+use std::sync::Arc;
 use std::{io, str};
 
 use bytes::BytesMut;
@@ -13,6 +15,7 @@ use futures::StreamExt;
 
 use romio::{TcpListener, TcpStream};
 
+use super::broker::*;
 use super::common::*;
 use super::types::*;
 
@@ -43,7 +46,10 @@ fn decode(buf: &mut BytesMut) -> Result<Option<ClientIncoming>, io::Error> {
     result
 }
 
-async fn start_sub(tx: mpsc::Sender<BrokerMessage>, mut threadpool: ThreadPool) -> io::Result<()> {
+async fn start_sub(
+    mut threadpool: ThreadPool,
+    broker_manager: Arc<BrokerManager>,
+) -> io::Result<()> {
     let mut listener = TcpListener::bind(&"127.0.0.1:7879".parse().unwrap())?;
     let mut incoming = listener.incoming();
 
@@ -52,15 +58,15 @@ async fn start_sub(tx: mpsc::Sender<BrokerMessage>, mut threadpool: ThreadPool) 
 
     while let Some(stream) = incoming.next().await {
         threadpool
-            .spawn(new_sub_client(tx.clone(), stream?, connections))
+            .spawn(new_sub_client(stream?, connections, broker_manager.clone()))
             .unwrap();
         connections += 1;
     }
     Ok(())
 }
 
-pub async fn start_sub_empty(tx: mpsc::Sender<BrokerMessage>, threadpool: ThreadPool) {
-    start_sub(tx, threadpool).await.unwrap();
+pub async fn start_sub_empty(threadpool: ThreadPool, broker_manager: Arc<BrokerManager>) {
+    start_sub(threadpool, broker_manager).await.unwrap();
 }
 
 async fn client_incoming(
@@ -137,20 +143,19 @@ async fn client_incoming(
 }
 
 async fn message_incoming(
-    tx: mpsc::Sender<BrokerMessage>,
     broker_tx: mpsc::Sender<ClientMessage>,
     mut rx: mpsc::Receiver<ClientMessage>,
     writer: WriteHalf<TcpStream>,
     idx: u64,
+    broker_manager: Arc<BrokerManager>,
 ) {
-    let tx = &tx;
+    let mut broker_tx_cache: HashMap<TopicPartition, mpsc::Sender<BrokerMessage>> = HashMap::new();
     let broker_tx = &broker_tx;
     let writer: &Mutex<WriteHalf<TcpStream>> = &Mutex::new(writer);
-    let mut message = rx.next().await;
     let mut cont = true;
+    let mut message = rx.next().await;
     while cont && message.is_some() {
         let mes = message.clone().unwrap();
-        let mut tx = tx.clone();
         let broker_tx = broker_tx.clone();
         let writer = writer.clone();
         println!("XXX Got client message!");
@@ -192,16 +197,24 @@ async fn message_incoming(
             }
             ClientMessage::Topic(topics) => {
                 let client_name = format!("Client_{}", idx);
-                if let Err(_) = tx
-                    .send(BrokerMessage::NewClient(
-                        client_name.to_string(),
-                        topics,
-                        broker_tx.clone(),
-                    ))
-                    .await
-                {
-                    println!("Error sending message to broker, close client.");
-                    cont = false;
+                for topic in topics.topics {
+                    let tp = TopicPartition {
+                        partition: 0,
+                        topic,
+                    };
+                    let tx = broker_tx_cache
+                        .entry(tp.clone())
+                        .or_insert(broker_manager.get_broker_tx(tp.clone()).await.unwrap());
+                    if let Err(_) = tx
+                        .send(BrokerMessage::NewClient(
+                            client_name.to_string(),
+                            broker_tx.clone(),
+                        ))
+                        .await
+                    {
+                        println!("Error sending message to broker, close client.");
+                        cont = false;
+                    }
                 }
             }
             ClientMessage::IncomingStatus(status) => {
@@ -214,14 +227,14 @@ async fn message_incoming(
     }
 }
 
-async fn new_sub_client(tx: mpsc::Sender<BrokerMessage>, stream: TcpStream, idx: u64) {
+async fn new_sub_client(stream: TcpStream, idx: u64, broker_manager: Arc<BrokerManager>) {
     let addr = stream.peer_addr().unwrap();
     let (reader, writer) = stream.split();
     println!("Accepting sub stream from: {}", addr);
     let (broker_tx, rx) = mpsc::channel::<ClientMessage>(10);
     join(
         client_incoming(broker_tx.clone(), reader),
-        message_incoming(tx, broker_tx, rx, writer, idx),
+        message_incoming(broker_tx, rx, writer, idx, broker_manager),
     )
     .await;
 

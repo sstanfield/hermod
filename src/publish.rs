@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::{io, str};
 
 use bytes::BytesMut;
@@ -12,6 +14,7 @@ use serde_json;
 
 use romio::{TcpListener, TcpStream};
 
+use super::broker::*;
 use super::common::*;
 use super::types::*;
 
@@ -41,7 +44,6 @@ enum PubIncoming {
     },
 }
 
-/// A simple `Codec` implementation that reads incoming messages.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 struct InMessageCodec {
     message: Option<Message>,
@@ -159,7 +161,10 @@ impl InMessageCodec {
     }
 }
 
-async fn start_pub(tx: mpsc::Sender<BrokerMessage>, mut threadpool: ThreadPool) -> io::Result<()> {
+async fn start_pub(
+    mut threadpool: ThreadPool,
+    broker_manager: Arc<BrokerManager>,
+) -> io::Result<()> {
     let mut listener = TcpListener::bind(&"127.0.0.1:7878".parse().unwrap())?;
     let mut incoming = listener.incoming();
 
@@ -167,20 +172,21 @@ async fn start_pub(tx: mpsc::Sender<BrokerMessage>, mut threadpool: ThreadPool) 
 
     while let Some(stream) = incoming.next().await {
         threadpool
-            .spawn(new_pub_client(stream?, tx.clone()))
+            .spawn(new_pub_client(stream?, broker_manager.clone()))
             .unwrap();
     }
     Ok(())
 }
 
-pub async fn start_pub_empty(tx: mpsc::Sender<BrokerMessage>, threadpool: ThreadPool) {
-    start_pub(tx, threadpool).await.unwrap();
+pub async fn start_pub_empty(threadpool: ThreadPool, broker_manager: Arc<BrokerManager>) {
+    start_pub(threadpool, broker_manager).await.unwrap();
 }
 
-async fn new_pub_client(stream: TcpStream, mut tx: mpsc::Sender<BrokerMessage>) {
+async fn new_pub_client(stream: TcpStream, broker_manager: Arc<BrokerManager>) {
     let buf_size = 64000;
     let mut in_bytes = BytesMut::with_capacity(buf_size);
     in_bytes.resize(buf_size, 0);
+    let mut broker_tx_cache: HashMap<TopicPartition, mpsc::Sender<BrokerMessage>> = HashMap::new();
     let addr = stream.peer_addr().unwrap();
     println!("Accepting pub stream from: {}", addr);
 
@@ -203,6 +209,13 @@ async fn new_pub_client(stream: TcpStream, mut tx: mpsc::Sender<BrokerMessage>) 
                         decoding = false;
                         match codec.decode(&mut in_bytes) {
                             Ok(Some(message)) => {
+                                let tp = TopicPartition {
+                                    partition: 0,
+                                    topic: message.topic.clone(),
+                                };
+                                let tx = broker_tx_cache.entry(tp.clone()).or_insert(
+                                    broker_manager.get_broker_tx(tp.clone()).await.unwrap(),
+                                );
                                 if let Err(error) = tx.send(BrokerMessage::Message(message)).await {
                                     println!("Error sending to broker: {}", error);
                                     cont = false;

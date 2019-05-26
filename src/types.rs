@@ -37,13 +37,21 @@ pub struct Status {
     pub status: String,
 }
 
+#[derive(Clone)]
 pub enum ClientIncoming {
     Topic(ClientTopics),
     Status(Status),
 }
 
+#[derive(Clone)]
 pub enum BrokerMessage {
     Message(Message),
-    NewClient(String, ClientTopics, mpsc::Sender<ClientMessage>),
+    NewClient(String, mpsc::Sender<ClientMessage>),
     CloseClient(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct TopicPartition {
+    pub partition: u64,
+    pub topic: String,
 }
