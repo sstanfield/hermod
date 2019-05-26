@@ -35,10 +35,10 @@ impl BrokerManager {
             return Ok(brokers.get(&tp).unwrap().clone());
         }
         let (tx, rx) = mpsc::channel::<BrokerMessage>(10);
-        brokers.insert(tp, tx.clone());
+        brokers.insert(tp.clone(), tx.clone());
         drop(brokers);
         let threadpool = &mut data.1;
-        if let Err(_) = threadpool.spawn(new_message_broker(rx)) {
+        if let Err(_) = threadpool.spawn(new_message_broker(rx, tp)) {
             println!(
                 "Got error spawning task for partion {}, topic {}",
                 partition, topic
@@ -50,8 +50,8 @@ impl BrokerManager {
     }
 }
 
-async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>) {
-    println!("Broker starting.");
+async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPartition) {
+    println!("Broker starting for partition {}, topic {}.", tp.partition, tp.topic);
     let mut client_tx: HashMap<String, mpsc::Sender<ClientMessage>> = HashMap::new();
     let mut sequence = 0;
     let mut message = rx.next().await;
@@ -77,5 +77,5 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>) {
         };
         message = rx.next().await;
     }
-    println!("Broker ending.");
+    println!("Broker ending for partition {}, topic {}.", tp.partition, tp.topic);
 }
