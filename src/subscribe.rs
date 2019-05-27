@@ -19,6 +19,8 @@ use super::broker::*;
 use super::common::*;
 use super::types::*;
 
+use log::{error, info};
+
 fn decode(buf: &mut BytesMut) -> Result<Option<ClientIncoming>, io::Error> {
     let mut result: Result<Option<ClientIncoming>, io::Error> = Ok(None);
     if let Some(brace_offset) = buf[..].iter().position(|b| *b == b'{') {
@@ -53,7 +55,7 @@ async fn start_sub(
     let mut listener = TcpListener::bind(&"127.0.0.1:7879".parse().unwrap())?;
     let mut incoming = listener.incoming();
 
-    println!("Sub listening on 127.0.0.1:7879");
+    info!("Sub listening on 127.0.0.1:7879");
     let mut connections = 0;
 
     while let Some(stream) = incoming.next().await {
@@ -82,7 +84,7 @@ async fn client_incoming(
         match reader.read(&mut in_bytes[leftover_bytes..]).await {
             Ok(bytes) => {
                 if bytes == 0 {
-                    println!("No bytes read, closing client.");
+                    info!("No bytes read, closing client.");
                     cont = false;
                 } else {
                     in_bytes.truncate(leftover_bytes + bytes);
@@ -94,7 +96,6 @@ async fn client_incoming(
                             Ok(None) => {
                                 if !in_bytes.is_empty() {
                                     leftover_bytes = in_bytes.len();
-                                    //println!("XXXX leftover_bytes: {}", leftover_bytes);
                                 }
                             }
                             Ok(Some(ClientIncoming::Status(status))) => {
@@ -102,7 +103,7 @@ async fn client_incoming(
                                     .send(ClientMessage::IncomingStatus(status))
                                     .await
                                 {
-                                    println!("Error sending client status, closing connection!");
+                                    error!("Error sending client status, closing connection!");
                                     cont = false;
                                 } else {
                                     decoding = true;
@@ -112,14 +113,14 @@ async fn client_incoming(
                                 if let Err(_) =
                                     message_incoming_tx.send(ClientMessage::Topic(topic)).await
                                 {
-                                    println!("Error sending client status, closing connection!");
+                                    error!("Error sending client status, closing connection!");
                                     cont = false;
                                 } else {
                                     decoding = true;
                                 }
                             }
                             Err(_) => {
-                                println!("Error decoding client message, closing connection");
+                                error!("Error decoding client message, closing connection");
                                 cont = false;
                             }
                         }
@@ -132,7 +133,7 @@ async fn client_incoming(
                 }
             }
             Err(_) => {
-                println!("Error reading client, closing connection");
+                error!("Error reading client, closing connection");
                 cont = false;
             }
         }
@@ -158,7 +159,6 @@ async fn message_incoming(
         let mes = message.clone().unwrap();
         let broker_tx = broker_tx.clone();
         let writer = writer.clone();
-        println!("XXX Got client message!");
         match mes {
             ClientMessage::Over => {
                 rx.close();
@@ -170,7 +170,7 @@ async fn message_incoming(
                 );
                 let mut writer = writer.lock().await;
                 if let Err(_) = writer.write_all(v.as_bytes()).await {
-                    println!("Error writing to client, closing!");
+                    error!("Error writing to client, closing!");
                     cont = false;
                 }
             }
@@ -178,7 +178,7 @@ async fn message_incoming(
                 let v = "{ \"status\": \"OK\"}";
                 let mut writer = writer.lock().await;
                 if let Err(_) = writer.write_all(v.as_bytes()).await {
-                    println!("Error writing to client, closing!");
+                    error!("Error writing to client, closing!");
                     cont = false;
                 }
             }
@@ -187,11 +187,11 @@ async fn message_incoming(
                                    message.topic, message.payload_size, message.checksum, message.sequence); //.clone().as_bytes();
                 let mut writer = writer.lock().await;
                 if let Err(_) = writer.write_all(v.as_bytes()).await {
-                    println!("Error writing to client, closing!");
+                    error!("Error writing to client, closing!");
                     cont = false;
                 }
                 if let Err(_) = writer.write_all(&message.payload[..]).await {
-                    println!("Error writing to client, closing!");
+                    error!("Error writing to client, closing!");
                     cont = false;
                 }
             }
@@ -212,7 +212,7 @@ async fn message_incoming(
                         ))
                         .await
                     {
-                        println!("Error sending message to broker, close client.");
+                        error!("Error sending message to broker, close client.");
                         cont = false;
                     }
                 }
@@ -230,7 +230,7 @@ async fn message_incoming(
 async fn new_sub_client(stream: TcpStream, idx: u64, broker_manager: Arc<BrokerManager>) {
     let addr = stream.peer_addr().unwrap();
     let (reader, writer) = stream.split();
-    println!("Accepting sub stream from: {}", addr);
+    info!("Accepting sub stream from: {}", addr);
     let (broker_tx, rx) = mpsc::channel::<ClientMessage>(10);
     join(
         client_incoming(broker_tx.clone(), reader),
@@ -238,5 +238,5 @@ async fn new_sub_client(stream: TcpStream, idx: u64, broker_manager: Arc<BrokerM
     )
     .await;
 
-    println!("Closing sub stream from: {}", addr);
+    info!("Closing sub stream from: {}", addr);
 }

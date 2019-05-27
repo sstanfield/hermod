@@ -9,6 +9,8 @@ use futures::StreamExt;
 
 use super::types::*;
 
+use log::{error, info};
+
 pub struct BrokerManager {
     brokers: Mutex<(
         HashMap<TopicPartition, mpsc::Sender<BrokerMessage>>,
@@ -39,7 +41,7 @@ impl BrokerManager {
         drop(brokers);
         let threadpool = &mut data.1;
         if let Err(_) = threadpool.spawn(new_message_broker(rx, tp)) {
-            println!(
+            error!(
                 "Got error spawning task for partion {}, topic {}",
                 partition, topic
             );
@@ -51,13 +53,15 @@ impl BrokerManager {
 }
 
 async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPartition) {
-    println!("Broker starting for partition {}, topic {}.", tp.partition, tp.topic);
+    info!(
+        "Broker starting for partition {}, topic {}.",
+        tp.partition, tp.topic
+    );
     let mut client_tx: HashMap<String, mpsc::Sender<ClientMessage>> = HashMap::new();
     let mut sequence = 0;
     let mut message = rx.next().await;
     while message.is_some() {
         let mes = message.clone().unwrap();
-        println!("XXX Broker got message!");
         match mes {
             BrokerMessage::Message(mut message) => {
                 message.sequence = sequence;
@@ -77,5 +81,8 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
         };
         message = rx.next().await;
     }
-    println!("Broker ending for partition {}, topic {}.", tp.partition, tp.topic);
+    info!(
+        "Broker ending for partition {}, topic {}.",
+        tp.partition, tp.topic
+    );
 }

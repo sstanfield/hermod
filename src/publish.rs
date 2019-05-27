@@ -18,6 +18,8 @@ use super::broker::*;
 use super::common::*;
 use super::types::*;
 
+use log::{error, info};
+
 fn zero_val() -> usize {
     0
 }
@@ -168,7 +170,7 @@ async fn start_pub(
     let mut listener = TcpListener::bind(&"127.0.0.1:7878".parse().unwrap())?;
     let mut incoming = listener.incoming();
 
-    println!("Pub listening on 127.0.0.1:7878");
+    info!("Pub listening on 127.0.0.1:7878");
 
     while let Some(stream) = incoming.next().await {
         threadpool
@@ -188,7 +190,7 @@ async fn new_pub_client(stream: TcpStream, broker_manager: Arc<BrokerManager>) {
     in_bytes.resize(buf_size, 0);
     let mut broker_tx_cache: HashMap<TopicPartition, mpsc::Sender<BrokerMessage>> = HashMap::new();
     let addr = stream.peer_addr().unwrap();
-    println!("Accepting pub stream from: {}", addr);
+    info!("Accepting pub stream from: {}", addr);
 
     let (mut reader, mut writer) = stream.split();
     let mut codec = InMessageCodec::new();
@@ -198,10 +200,9 @@ async fn new_pub_client(stream: TcpStream, broker_manager: Arc<BrokerManager>) {
         match reader.read(&mut in_bytes[leftover_bytes..]).await {
             Ok(bytes) => {
                 if bytes == 0 {
-                    println!("No bytes");
+                    error!("Remote publisher done.");
                     cont = false;
                 } else {
-                    //println!("XXXX bytes: {}", bytes);
                     in_bytes.truncate(leftover_bytes + bytes);
                     leftover_bytes = 0;
                     let mut decoding = true;
@@ -217,7 +218,7 @@ async fn new_pub_client(stream: TcpStream, broker_manager: Arc<BrokerManager>) {
                                     broker_manager.get_broker_tx(tp.clone()).await.unwrap(),
                                 );
                                 if let Err(error) = tx.send(BrokerMessage::Message(message)).await {
-                                    println!("Error sending to broker: {}", error);
+                                    error!("Error sending to broker: {}", error);
                                     cont = false;
                                 } else {
                                     decoding = true;
@@ -226,31 +227,28 @@ async fn new_pub_client(stream: TcpStream, broker_manager: Arc<BrokerManager>) {
                             Ok(None) => {
                                 if !in_bytes.is_empty() {
                                     leftover_bytes = in_bytes.len();
-                                    //println!("XXXX leftover_bytes: {}", leftover_bytes);
                                 }
                             }
                             Err(error) => {
-                                println!("Decode error: {}", error);
+                                error!("Decode error: {}", error);
                                 cont = false;
                             }
                         }
                     }
-                    //println!("XXX in_bytes pre  len: {}, cap: {}", in_bytes.len(), in_bytes.capacity());
                     // Reclaim the entire buffer and copy leftover bytes to front.
                     in_bytes.reserve(buf_size - in_bytes.len());
                     unsafe {
                         in_bytes.set_len(buf_size);
                     }
-                    //println!("XXX in_bytes post len: {}, cap: {}", in_bytes.len(), in_bytes.capacity());
                 }
             }
             Err(error) => {
-                println!("Error reading socket: {}", error);
+                error!("Error reading socket: {}", error);
                 cont = false;
             }
         }
     }
 
-    println!("Closing pub stream from: {}", addr);
+    info!("Closing pub stream from: {}", addr);
     writer.close();
 }

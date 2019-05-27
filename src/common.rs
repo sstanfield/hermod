@@ -1,4 +1,3 @@
-
 pub fn last_brace(buf: &[u8]) -> Option<usize> {
     let mut opens = 0;
     let mut count = 0;
