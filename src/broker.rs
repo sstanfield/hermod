@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 
 use futures::channel::mpsc;
 use futures::executor::ThreadPool;
@@ -57,6 +59,18 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
         "Broker starting for partition {}, topic {}.",
         tp.partition, tp.topic
     );
+    let log_file_name = format!("{}.{}.log", tp.topic, tp.partition);
+    let log_file = OpenOptions::new()
+        .read(false)
+        .write(true)
+        .append(true)
+        .create(true)
+        .open(&log_file_name);
+    if let Err(_) = log_file {
+        error!("Failed to open log file {}", log_file_name);
+        return;
+    }
+    let mut log_file = log_file.unwrap();
     let mut client_tx: HashMap<String, mpsc::Sender<ClientMessage>> = HashMap::new();
     let mut sequence = 0;
     let mut message = rx.next().await;
@@ -65,6 +79,19 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
         match mes {
             BrokerMessage::Message(mut message) => {
                 message.sequence = sequence;
+
+                let v = format!("{{ \"topic\": \"{}\", \"payload_size\": {}, \"checksum\": \"{}\", \"sequence\": {} }}",
+                                   message.topic, message.payload_size, message.checksum, message.sequence);
+                if let Err(_) = log_file.write(v.as_bytes()) {
+                    error!("Failed to write message to log file: {}", log_file_name);
+                }
+                if let Err(_) = log_file.write(&message.payload) {
+                    error!("Failed to write payload to log file: {}", log_file_name);
+                }
+                if let Err(_) = log_file.flush() {
+                    error!("Failed to flush log file: {}", log_file_name);
+                }
+
                 sequence += 1;
                 for tx in client_tx.values_mut() {
                     if let Err(_) = tx.send(ClientMessage::Message(message.clone())).await {
