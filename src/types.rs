@@ -13,7 +13,7 @@ pub struct Message {
     pub topic: String,
     pub payload_size: usize,
     pub checksum: String,
-    pub sequence: usize,
+    pub sequence: u64,
     pub payload: Vec<u8>,
 }
 
