@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::{io, str};
 
@@ -193,6 +195,32 @@ async fn message_incoming(
                 if let Err(_) = writer.write_all(&message.payload[..]).await {
                     error!("Error writing to client, closing!");
                     cont = false;
+                }
+            }
+            ClientMessage::MessageBatch(file_name, start, length) => {
+                let buf_size = 128000;
+                let mut buf = vec![0; buf_size];
+                let mut file = File::open(&file_name).unwrap();
+                file.seek(SeekFrom::Start(start)).unwrap();
+                let mut left = length as usize;
+                let mut writer = writer.lock().await;
+                // XXX this is sync and dumb, get an async sendfile...
+                while left > 0 {
+                    let buf_len = if left < buf_size {
+                        left
+                    } else {
+                        buf_size
+                    };
+                    match file.read(&mut buf[..buf_len]) {
+                        Ok(bytes) => {
+                            writer.write_all(&buf[..bytes]).await.unwrap(); // XXX no unwrap...
+                            left -= bytes;
+                        }
+                        Err(error) => {
+                            // XXX do better.
+                            error!("{}", error);
+                        }
+                    }
                 }
             }
             ClientMessage::Topic(topics) => {

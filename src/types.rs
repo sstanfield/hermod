@@ -27,6 +27,7 @@ pub enum ClientMessage {
     StatusOk,
     StatusError(u32, String),
     Message(Message),
+    MessageBatch(String, u64, u64),
     Over,
     Topic(ClientTopics),
     IncomingStatus(Status),

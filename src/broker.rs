@@ -90,6 +90,7 @@ impl LogIndex {
 }
 
 struct MessageLog {
+    log_file_name: String,
     log_append: File,
     log_read: File,
     idx_append: File,
@@ -134,6 +135,7 @@ impl MessageLog {
         }
 
         Ok(MessageLog {
+            log_file_name,
             log_append,
             log_read,
             idx_append,
@@ -202,7 +204,17 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                     }
                 }
             }
-            BrokerMessage::NewClient(client_name, tx) => {
+            BrokerMessage::NewClient(client_name, mut tx) => {
+                if let Err(_) = tx
+                    .send(ClientMessage::MessageBatch(
+                        msg_log.log_file_name.clone(),
+                        0,
+                        msg_log.log_end,
+                    ))
+                    .await
+                {
+                    // XXX Revome bad client.
+                }
                 client_tx.insert(client_name.to_string(), tx.clone());
             }
             BrokerMessage::CloseClient(client_name) => {
