@@ -68,74 +68,68 @@ impl InMessageCodec {
         let mut result: Result<Option<Message>, io::Error> = Ok(None);
         let mut is_batch = false;
         if self.message.is_none() {
-            if let Some(brace_offset) = buf[..].iter().position(|b| *b == b'{') {
-                if brace_offset > 0 {
-                    buf.advance(brace_offset);
-                }
-            }
-            if let Some(message_offset) = last_brace(&buf[..]) {
-                if message_offset > 3 {
-                    let line = buf.split_to(message_offset + 1);
-                    let incoming: PubIncoming = serde_json::from_slice(&line[..])?;
-                    match incoming {
-                        PubIncoming::Message {
+            if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
+                buf.advance(first_brace);
+                let line = buf.split_to(message_offset + 1);
+                let incoming: PubIncoming = serde_json::from_slice(&line[..])?;
+                match incoming {
+                    PubIncoming::Message {
+                        topic,
+                        payload_size,
+                        checksum,
+                    } => {
+                        let message_type = if self.in_batch {
+                            self.batch_count += 1;
+                            if self.batch_count == self.expected_batch_count {
+                                self.in_batch = false;
+                                self.batch_count = 0;
+                                let count = self.expected_batch_count;
+                                self.expected_batch_count = 0;
+                                MessageType::BatchEnd { count }
+                            } else {
+                                MessageType::BatchMessage
+                            }
+                        } else {
+                            MessageType::Message
+                        };
+                        let message = Message {
+                            message_type,
                             topic,
                             payload_size,
                             checksum,
-                        } => {
-                            let message_type = if self.in_batch {
-                                self.batch_count += 1;
-                                if self.batch_count == self.expected_batch_count {
-                                    self.in_batch = false;
-                                    self.batch_count = 0;
-                                    let count = self.expected_batch_count;
-                                    self.expected_batch_count = 0;
-                                    MessageType::BatchEnd { count }
-                                } else {
-                                    MessageType::BatchMessage
-                                }
-                            } else {
-                                MessageType::Message
-                            };
-                            let message = Message {
-                                message_type,
-                                topic,
-                                payload_size,
-                                checksum,
-                                sequence: 0,
-                                payload: vec![],
-                            };
-                            self.message = Some(message);
-                        }
-                        PubIncoming::Batch { batch_type, count } => {
-                            match batch_type {
-                                BatchType::Start => {
-                                    self.in_batch = true;
-                                    result = Ok(None);
-                                }
-                                BatchType::End => {
-                                    self.in_batch = false;
-                                    result = Ok(Some(Message {
-                                        message_type: MessageType::BatchEnd {
-                                            count: self.batch_count,
-                                        },
-                                        topic: "".to_string(),
-                                        payload_size: 0,
-                                        checksum: "".to_string(),
-                                        sequence: 0,
-                                        payload: vec![],
-                                    }));
-                                    self.batch_count = 0;
-                                }
-                                BatchType::Count => {
-                                    self.in_batch = true;
-                                    self.batch_count = 0;
-                                    self.expected_batch_count = count;
-                                    result = Ok(None);
-                                }
+                            sequence: 0,
+                            payload: vec![],
+                        };
+                        self.message = Some(message);
+                    }
+                    PubIncoming::Batch { batch_type, count } => {
+                        match batch_type {
+                            BatchType::Start => {
+                                self.in_batch = true;
+                                result = Ok(None);
                             }
-                            is_batch = true;
+                            BatchType::End => {
+                                self.in_batch = false;
+                                result = Ok(Some(Message {
+                                    message_type: MessageType::BatchEnd {
+                                        count: self.batch_count,
+                                    },
+                                    topic: "".to_string(),
+                                    payload_size: 0,
+                                    checksum: "".to_string(),
+                                    sequence: 0,
+                                    payload: vec![],
+                                }));
+                                self.batch_count = 0;
+                            }
+                            BatchType::Count => {
+                                self.in_batch = true;
+                                self.batch_count = 0;
+                                self.expected_batch_count = count;
+                                result = Ok(None);
+                            }
                         }
+                        is_batch = true;
                     }
                 }
             }

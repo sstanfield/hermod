@@ -25,26 +25,20 @@ use log::{error, info};
 
 fn decode(buf: &mut BytesMut) -> Result<Option<ClientIncoming>, io::Error> {
     let mut result: Result<Option<ClientIncoming>, io::Error> = Ok(None);
-    if let Some(brace_offset) = buf[..].iter().position(|b| *b == b'{') {
-        if brace_offset > 0 {
-            buf.advance(brace_offset);
+    if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
+        buf.advance(first_brace);
+        let line = buf.split_to(message_offset + 1);
+        let line_str: String;
+        match str::from_utf8(&line[..]) {
+            Ok(str) => line_str = str.to_string(),
+            Err(err) => return Err(io::Error::new(io::ErrorKind::Other, err.description())),
         }
-    }
-    if let Some(message_offset) = last_brace(&buf[..]) {
-        if message_offset > 3 {
-            let line = buf.split_to(message_offset + 1);
-            let line_str: String;
-            match str::from_utf8(&line[..]) {
-                Ok(str) => line_str = str.to_string(),
-                Err(err) => return Err(io::Error::new(io::ErrorKind::Other, err.description())),
-            }
-            if line_str.to_lowercase().contains("topics") {
-                let topics: ClientTopics = serde_json::from_slice(&line[..])?;
-                result = Ok(Some(ClientIncoming::Topic(topics)));
-            } else {
-                let status: Status = serde_json::from_slice(&line[..])?;
-                result = Ok(Some(ClientIncoming::Status(status)));
-            }
+        if line_str.to_lowercase().contains("topics") {
+            let topics: ClientTopics = serde_json::from_slice(&line[..])?;
+            result = Ok(Some(ClientIncoming::Topic(topics)));
+        } else {
+            let status: Status = serde_json::from_slice(&line[..])?;
+            result = Ok(Some(ClientIncoming::Status(status)));
         }
     }
     result
@@ -78,6 +72,19 @@ pub async fn start_sub_empty(threadpool: ThreadPool, broker_manager: Arc<BrokerM
     start_sub(threadpool, broker_manager).await.unwrap();
 }
 
+async fn send_client_error(
+    mut message_incoming_tx: mpsc::Sender<ClientMessage>,
+    code: u32,
+    message: &str,
+) {
+    if let Err(_) = message_incoming_tx
+        .send(ClientMessage::StatusError(code, message.to_string()))
+        .await
+    {
+        error!("Error sending client status error, {}: {}!", code, message);
+    }
+}
+
 async fn client_incoming(
     mut message_incoming_tx: mpsc::Sender<ClientMessage>,
     mut reader: ReadHalf<TcpStream>,
@@ -88,6 +95,17 @@ async fn client_incoming(
     let mut leftover_bytes = 0;
     let mut cont = true;
     while cont {
+        if leftover_bytes >= in_bytes.len() {
+            error!("Error in incoming client message, closing connection");
+            cont = false;
+            send_client_error(
+                message_incoming_tx.clone(),
+                502,
+                "Invalid data, closing connection!",
+            )
+            .await;
+            continue;
+        }
         match reader.read(&mut in_bytes[leftover_bytes..]).await {
             Ok(bytes) => {
                 if bytes == 0 {
@@ -138,17 +156,12 @@ async fn client_incoming(
                             Err(_) => {
                                 error!("Error decoding client message, closing connection");
                                 cont = false;
-                                if let Err(_) = message_incoming_tx
-                                    .send(ClientMessage::StatusError(
-                                        501,
-                                        "Invalid data, closing connection!".to_string(),
-                                    ))
-                                    .await
-                                {
-                                    error!(
-                                        "Error sending client status error, closing connection!"
-                                    );
-                                }
+                                send_client_error(
+                                    message_incoming_tx.clone(),
+                                    501,
+                                    "Invalid data, closing connection!",
+                                )
+                                .await;
                             }
                         }
                     }
@@ -211,7 +224,7 @@ async fn message_incoming(
             }
             ClientMessage::Message(message) => {
                 let v = format!("{{ \"topic\": \"{}\", \"payload_size\": {}, \"checksum\": \"{}\", \"sequence\": {} }}",
-                                   message.topic, message.payload_size, message.checksum, message.sequence); //.clone().as_bytes();
+                                   message.topic, message.payload_size, message.checksum, message.sequence);
                 let mut writer = writer.lock().await;
                 if let Err(_) = writer.write_all(v.as_bytes()).await {
                     error!("Error writing to client, closing!");
