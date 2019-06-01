@@ -8,7 +8,7 @@ use std::{io, str};
 use bytes::BytesMut;
 use futures::channel::mpsc;
 use futures::executor::ThreadPool;
-use futures::future::join;
+use futures::future::FutureExt;
 use futures::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use futures::lock::Mutex;
 use futures::sink::SinkExt;
@@ -62,7 +62,12 @@ async fn start_sub(
 
     while let Some(stream) = incoming.next().await {
         threadpool
-            .spawn(new_sub_client(stream?, connections, broker_manager.clone()))
+            .spawn(new_sub_client(
+                stream?,
+                connections,
+                broker_manager.clone(),
+                threadpool.clone(),
+            ))
             .unwrap();
         connections += 1;
     }
@@ -115,15 +120,35 @@ async fn client_incoming(
                                 if let Err(_) =
                                     message_incoming_tx.send(ClientMessage::Topic(topic)).await
                                 {
-                                    error!("Error sending client status, closing connection!");
+                                    error!("Error sending client connect, closing connection!");
                                     cont = false;
                                 } else {
                                     decoding = true;
+                                    if let Err(_) =
+                                        message_incoming_tx.send(ClientMessage::StatusOk).await
+                                    {
+                                        error!(
+                                            "Error sending client status ok, closing connection!"
+                                        );
+                                        cont = false;
+                                        decoding = false;
+                                    }
                                 }
                             }
                             Err(_) => {
                                 error!("Error decoding client message, closing connection");
                                 cont = false;
+                                if let Err(_) = message_incoming_tx
+                                    .send(ClientMessage::StatusError(
+                                        501,
+                                        "Invalid data, closing connection!".to_string(),
+                                    ))
+                                    .await
+                                {
+                                    error!(
+                                        "Error sending client status error, closing connection!"
+                                    );
+                                }
                             }
                         }
                     }
@@ -206,11 +231,7 @@ async fn message_incoming(
                 let mut writer = writer.lock().await;
                 // XXX this is sync and dumb, get an async sendfile...
                 while left > 0 {
-                    let buf_len = if left < buf_size {
-                        left
-                    } else {
-                        buf_size
-                    };
+                    let buf_len = if left < buf_size { left } else { buf_size };
                     match file.read(&mut buf[..buf_len]) {
                         Ok(bytes) => {
                             writer.write_all(&buf[..bytes]).await.unwrap(); // XXX no unwrap...
@@ -247,24 +268,39 @@ async fn message_incoming(
             }
             ClientMessage::IncomingStatus(status) => {
                 if status.status.to_lowercase().eq("close") {
+                    info!("Client close request.");
                     rx.close();
+                    writer
+                        .lock()
+                        .then(async move |mut w| {
+                            w.close();
+                        })
+                        .await;
                 }
             }
         };
+        println!("XXXX awaiting message!");
         message = rx.next().await;
+        println!("XXXX got message!");
     }
+    info!("Exiting messaging_incoming.");
 }
 
-async fn new_sub_client(stream: TcpStream, idx: u64, broker_manager: Arc<BrokerManager>) {
+async fn new_sub_client(
+    stream: TcpStream,
+    idx: u64,
+    broker_manager: Arc<BrokerManager>,
+    mut threadpool: ThreadPool,
+) {
     let addr = stream.peer_addr().unwrap();
     let (reader, writer) = stream.split();
     info!("Accepting sub stream from: {}", addr);
     let (broker_tx, rx) = mpsc::channel::<ClientMessage>(10);
-    join(
-        client_incoming(broker_tx.clone(), reader),
-        message_incoming(broker_tx, rx, writer, idx, broker_manager),
-    )
-    .await;
+    // Do this so when message_incoming completes client_incoming is dropped and the connection closes.
+    let _client = threadpool
+        .spawn_with_handle(client_incoming(broker_tx.clone(), reader))
+        .unwrap();
+    message_incoming(broker_tx, rx, writer, idx, broker_manager).await;
 
     info!("Closing sub stream from: {}", addr);
 }
