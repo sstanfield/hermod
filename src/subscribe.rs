@@ -8,9 +8,7 @@ use std::{io, str};
 use bytes::BytesMut;
 use futures::channel::mpsc;
 use futures::executor::ThreadPool;
-use futures::future::FutureExt;
 use futures::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
-use futures::lock::Mutex;
 use futures::sink::SinkExt;
 use futures::task::SpawnExt;
 use futures::StreamExt;
@@ -46,6 +44,7 @@ fn decode(buf: &mut BytesMut) -> Result<Option<ClientIncoming>, io::Error> {
 
 async fn start_sub(
     mut threadpool: ThreadPool,
+    mut io_pool: ThreadPool,
     broker_manager: Arc<BrokerManager>,
 ) -> io::Result<()> {
     let mut listener = TcpListener::bind(&"127.0.0.1:7879".parse().unwrap())?;
@@ -61,6 +60,7 @@ async fn start_sub(
                 connections,
                 broker_manager.clone(),
                 threadpool.clone(),
+                io_pool.clone(),
             ))
             .unwrap();
         connections += 1;
@@ -68,8 +68,14 @@ async fn start_sub(
     Ok(())
 }
 
-pub async fn start_sub_empty(threadpool: ThreadPool, broker_manager: Arc<BrokerManager>) {
-    start_sub(threadpool, broker_manager).await.unwrap();
+pub async fn start_sub_empty(
+    threadpool: ThreadPool,
+    io_pool: ThreadPool,
+    broker_manager: Arc<BrokerManager>,
+) {
+    start_sub(threadpool, io_pool, broker_manager)
+        .await
+        .unwrap();
 }
 
 async fn send_client_error(
@@ -183,22 +189,49 @@ async fn client_incoming(
     }
 }
 
+async fn send_messages(
+    mut writer: WriteHalf<TcpStream>,
+    file_name: String,
+    start: u64,
+    length: u64,
+) -> WriteHalf<TcpStream> {
+    let buf_size = 128000;
+    let mut buf = vec![0; buf_size];
+    let mut file = File::open(&file_name).unwrap();
+    file.seek(SeekFrom::Start(start)).unwrap();
+    let mut left = length as usize;
+    // XXX this is sync and dumb, get an async sendfile...
+    while left > 0 {
+        let buf_len = if left < buf_size { left } else { buf_size };
+        match file.read(&mut buf[..buf_len]) {
+            Ok(bytes) => {
+                writer.write_all(&buf[..bytes]).await.unwrap(); // XXX no unwrap...
+                left -= bytes;
+            }
+            Err(error) => {
+                // XXX do better.
+                error!("{}", error);
+            }
+        }
+    }
+    writer
+}
+
 async fn message_incoming(
     broker_tx: mpsc::Sender<ClientMessage>,
     mut rx: mpsc::Receiver<ClientMessage>,
-    writer: WriteHalf<TcpStream>,
+    mut writer: WriteHalf<TcpStream>,
     idx: u64,
     broker_manager: Arc<BrokerManager>,
+    mut io_pool: ThreadPool,
 ) {
     let mut broker_tx_cache: HashMap<TopicPartition, mpsc::Sender<BrokerMessage>> = HashMap::new();
     let broker_tx = &broker_tx;
-    let writer: &Mutex<WriteHalf<TcpStream>> = &Mutex::new(writer);
     let mut cont = true;
     let mut message = rx.next().await;
     while cont && message.is_some() {
         let mes = message.clone().unwrap();
         let broker_tx = broker_tx.clone();
-        let writer = writer.clone();
         match mes {
             ClientMessage::Over => {
                 rx.close();
@@ -208,7 +241,6 @@ async fn message_incoming(
                     "{{ \"status\": \"ERROR\", \"code\": {}, \"message\": \"{}\" }}",
                     code, message
                 );
-                let mut writer = writer.lock().await;
                 if let Err(_) = writer.write_all(v.as_bytes()).await {
                     error!("Error writing to client, closing!");
                     cont = false;
@@ -216,7 +248,6 @@ async fn message_incoming(
             }
             ClientMessage::StatusOk => {
                 let v = "{ \"status\": \"OK\"}";
-                let mut writer = writer.lock().await;
                 if let Err(_) = writer.write_all(v.as_bytes()).await {
                     error!("Error writing to client, closing!");
                     cont = false;
@@ -225,7 +256,6 @@ async fn message_incoming(
             ClientMessage::Message(message) => {
                 let v = format!("{{ \"topic\": \"{}\", \"payload_size\": {}, \"checksum\": \"{}\", \"sequence\": {} }}",
                                    message.topic, message.payload_size, message.checksum, message.sequence);
-                let mut writer = writer.lock().await;
                 if let Err(_) = writer.write_all(v.as_bytes()).await {
                     error!("Error writing to client, closing!");
                     cont = false;
@@ -236,26 +266,10 @@ async fn message_incoming(
                 }
             }
             ClientMessage::MessageBatch(file_name, start, length) => {
-                let buf_size = 128000;
-                let mut buf = vec![0; buf_size];
-                let mut file = File::open(&file_name).unwrap();
-                file.seek(SeekFrom::Start(start)).unwrap();
-                let mut left = length as usize;
-                let mut writer = writer.lock().await;
-                // XXX this is sync and dumb, get an async sendfile...
-                while left > 0 {
-                    let buf_len = if left < buf_size { left } else { buf_size };
-                    match file.read(&mut buf[..buf_len]) {
-                        Ok(bytes) => {
-                            writer.write_all(&buf[..bytes]).await.unwrap(); // XXX no unwrap...
-                            left -= bytes;
-                        }
-                        Err(error) => {
-                            // XXX do better.
-                            error!("{}", error);
-                        }
-                    }
-                }
+                writer = io_pool
+                    .spawn_with_handle(send_messages(writer, file_name.clone(), start, length))
+                    .unwrap()
+                    .await;
             }
             ClientMessage::Topic(topics) => {
                 let client_name = format!("Client_{}", idx);
@@ -283,18 +297,10 @@ async fn message_incoming(
                 if status.status.to_lowercase().eq("close") {
                     info!("Client close request.");
                     rx.close();
-                    writer
-                        .lock()
-                        .then(async move |mut w| {
-                            w.close();
-                        })
-                        .await;
                 }
             }
         };
-        println!("XXXX awaiting message!");
         message = rx.next().await;
-        println!("XXXX got message!");
     }
     info!("Exiting messaging_incoming.");
 }
@@ -304,6 +310,7 @@ async fn new_sub_client(
     idx: u64,
     broker_manager: Arc<BrokerManager>,
     mut threadpool: ThreadPool,
+    mut io_pool: ThreadPool,
 ) {
     let addr = stream.peer_addr().unwrap();
     let (reader, writer) = stream.split();
@@ -313,7 +320,7 @@ async fn new_sub_client(
     let _client = threadpool
         .spawn_with_handle(client_incoming(broker_tx.clone(), reader))
         .unwrap();
-    message_incoming(broker_tx, rx, writer, idx, broker_manager).await;
+    message_incoming(broker_tx, rx, writer, idx, broker_manager, io_pool).await;
 
     info!("Closing sub stream from: {}", addr);
 }
