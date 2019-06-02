@@ -17,3 +17,6 @@ pub use crate::subscribe::*;
 
 pub mod broker;
 pub use crate::broker::*;
+
+pub mod msglog;
+pub use crate::msglog::*;

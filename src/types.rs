@@ -17,11 +17,6 @@ pub struct Message {
     pub payload: Vec<u8>,
 }
 
-#[derive(Deserialize, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct ClientTopics {
-    pub topics: Vec<String>,
-}
-
 #[derive(Clone)]
 pub enum ClientMessage {
     StatusOk,
@@ -29,25 +24,16 @@ pub enum ClientMessage {
     Message(Message),
     MessageBatch(String, u64, u64),
     Over,
-    Topic(ClientTopics),
-    IncomingStatus(Status),
-}
-
-#[derive(Deserialize, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct Status {
-    pub status: String,
-}
-
-#[derive(Clone)]
-pub enum ClientIncoming {
-    Topic(ClientTopics),
-    Status(Status),
+    Connect(String, String, Vec<String>),
+    Topic(Vec<String>),
+    IncomingStatus(String),
+    Commit(String, u64, u64),
 }
 
 #[derive(Clone)]
 pub enum BrokerMessage {
     Message(Message),
-    NewClient(String, mpsc::Sender<ClientMessage>),
+    NewClient(String, String, mpsc::Sender<ClientMessage>),
     CloseClient(String),
 }
 

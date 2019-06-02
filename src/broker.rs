@@ -1,11 +1,4 @@
 use std::collections::HashMap;
-use std::fs::File;
-use std::fs::OpenOptions;
-use std::io;
-use std::io::Read;
-use std::io::Seek;
-use std::io::SeekFrom;
-use std::io::Write;
 
 use futures::channel::mpsc;
 use futures::executor::ThreadPool;
@@ -14,21 +7,44 @@ use futures::sink::SinkExt;
 use futures::task::SpawnExt;
 use futures::StreamExt;
 
+use super::msglog::*;
 use super::types::*;
 
 use log::{error, info};
+
+use serde_json;
+
+#[derive(Deserialize)]
+struct OffsetRecord {
+    group_id: String,
+    partition: u64,
+    topic: String,
+    offset: u64,
+}
 
 pub struct BrokerManager {
     brokers: Mutex<(
         HashMap<TopicPartition, mpsc::Sender<BrokerMessage>>,
         ThreadPool,
+        mpsc::Sender<BrokerMessage>,
     )>,
 }
 
 impl BrokerManager {
-    pub fn new(threadpool: ThreadPool) -> BrokerManager {
+    pub fn new(mut threadpool: ThreadPool) -> BrokerManager {
+        let tp = TopicPartition {
+            topic: "__topic_online".to_string(),
+            partition: 0,
+        };
+        let (topic_online_tx, rx) = mpsc::channel::<BrokerMessage>(10);
+        if let Err(_) = threadpool.spawn(new_message_broker(rx, tp.clone())) {
+            error!(
+                "Got error spawning task for partion {}, topic {}",
+                tp.partition, tp.topic
+            );
+        }
         BrokerManager {
-            brokers: Mutex::new((HashMap::new(), threadpool)),
+            brokers: Mutex::new((HashMap::new(), threadpool, topic_online_tx)),
         }
     }
 
@@ -47,129 +63,34 @@ impl BrokerManager {
         brokers.insert(tp.clone(), tx.clone());
         drop(brokers);
         let threadpool = &mut data.1;
-        if let Err(_) = threadpool.spawn(new_message_broker(rx, tp)) {
+        if let Err(_) = threadpool.spawn(new_message_broker(rx, tp.clone())) {
             error!(
                 "Got error spawning task for partion {}, topic {}",
                 partition, topic
             );
             Err(())
         } else {
+            drop(threadpool);
+            let topic_online_tx = &mut data.2;
+            let payload = format!(
+                "{{\"partition\": {}, \"topic\": \"{}\"}}",
+                tp.partition, tp.topic
+            )
+            .into_bytes();
+            let message = Message {
+                message_type: MessageType::Message,
+                topic: "__topic_online".to_string(),
+                payload_size: payload.len(),
+                checksum: "".to_string(),
+                sequence: 0,
+                payload,
+            };
+            if let Err(error) = topic_online_tx.send(BrokerMessage::Message(message)).await {
+                error!("Error sending to broker: {}", error);
+            }
+
             Ok(tx.clone())
         }
-    }
-}
-
-struct LogIndex {
-    offset: u64,
-    time: u64,
-    position: u64,
-    size: usize,
-}
-
-impl LogIndex {
-    fn empty() -> LogIndex {
-        LogIndex {
-            offset: 0,
-            time: 0,
-            position: 0,
-            size: 0,
-        }
-    }
-
-    fn size() -> usize {
-        std::mem::size_of::<LogIndex>()
-    }
-
-    unsafe fn as_bytes(&self) -> &[u8] {
-        std::slice::from_raw_parts((self as *const LogIndex) as *const u8, LogIndex::size())
-    }
-
-    unsafe fn as_bytes_mut(&mut self) -> &mut [u8] {
-        std::slice::from_raw_parts_mut((self as *mut LogIndex) as *mut u8, LogIndex::size())
-    }
-}
-
-struct MessageLog {
-    log_file_name: String,
-    log_append: File,
-    log_read: File,
-    idx_append: File,
-    idx_read: File,
-    log_end: u64,
-    idx_end: u64,
-    offset: u64,
-}
-
-impl MessageLog {
-    fn new(tp: &TopicPartition) -> io::Result<MessageLog> {
-        let log_file_name = format!("{}.{}.log", tp.topic, tp.partition);
-        let mut log_append = OpenOptions::new()
-            .read(false)
-            .write(true)
-            .append(true)
-            .create(true)
-            .open(&log_file_name)?;
-        log_append.seek(SeekFrom::End(0))?;
-        let log_end = log_append.seek(SeekFrom::Current(0))?;
-
-        let log_file_idx_name = format!("{}.{}.idx", tp.topic, tp.partition);
-        let mut idx_append = OpenOptions::new()
-            .read(false)
-            .write(true)
-            .append(true)
-            .create(true)
-            .open(&log_file_idx_name)?;
-        idx_append.seek(SeekFrom::End(0))?;
-        let idx_end = idx_append.seek(SeekFrom::Current(0))?;
-        let log_read = File::open(&log_file_name)?;
-        let mut idx_read = File::open(&log_file_idx_name)?;
-
-        let mut offset = 0;
-        if idx_end > LogIndex::size() as u64 {
-            idx_read.seek(SeekFrom::Start(idx_end - LogIndex::size() as u64))?;
-            let mut idx = LogIndex::empty();
-            unsafe {
-                idx_read.read(idx.as_bytes_mut())?;
-            }
-            offset = idx.offset + 1;
-        }
-
-        Ok(MessageLog {
-            log_file_name,
-            log_append,
-            log_read,
-            idx_append,
-            idx_read,
-            log_end,
-            idx_end,
-            offset,
-        })
-    }
-
-    fn append(&mut self, message: &Message) -> io::Result<()> {
-        let v = format!(
-            "{{ \"topic\": \"{}\", \"payload_size\": {}, \"checksum\": \"{}\", \"sequence\": {} }}",
-            message.topic, message.payload_size, message.checksum, message.sequence
-        );
-        self.log_append.write(v.as_bytes())?;
-        self.log_append.write(&message.payload)?;
-        self.log_append.flush()?;
-        let idx = LogIndex {
-            offset: message.sequence as u64,
-            // XXX set time
-            time: 0,
-            position: self.log_end,
-            size: v.as_bytes().len() + message.payload_size,
-        };
-        // XXX Verfiy the entire message was written?
-        self.log_end += (v.as_bytes().len() + message.payload_size) as u64;
-        unsafe {
-            self.idx_append.write(idx.as_bytes())?;
-        }
-        self.idx_append.flush()?;
-        self.idx_end += std::mem::size_of::<LogIndex>() as u64;
-        self.offset += 1;
-        Ok(())
     }
 }
 
@@ -179,7 +100,7 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
         tp.partition, tp.topic
     );
 
-    let msg_log = MessageLog::new(&tp);
+    let msg_log = MessageLog::new(&tp, tp.topic.starts_with("__consumer_offsets"));
     if let Err(error) = msg_log {
         error!("Failed to open the message log {}", error);
         return;
@@ -191,7 +112,7 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
         let mes = message.clone().unwrap();
         match mes {
             BrokerMessage::Message(mut message) => {
-                message.sequence = msg_log.offset;
+                message.sequence = msg_log.offset();
 
                 if let Err(error) = msg_log.append(&message) {
                     error!("Failed to message log {}", error);
@@ -200,20 +121,49 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
 
                 for tx in client_tx.values_mut() {
                     if let Err(_) = tx.send(ClientMessage::Message(message.clone())).await {
-                        // XXX Revome bad client.
+                        // XXX Remove bad client.
                     }
                 }
             }
-            BrokerMessage::NewClient(client_name, mut tx) => {
-                if let Err(_) = tx
-                    .send(ClientMessage::MessageBatch(
-                        msg_log.log_file_name.clone(),
-                        0,
-                        msg_log.log_end,
-                    ))
-                    .await
-                {
-                    // XXX Revome bad client.
+            BrokerMessage::NewClient(client_name, group_id, mut tx) => {
+                let commit_topic = format!(
+                    "__consumer_offsets-{}-{}-{}",
+                    group_id, tp.topic, tp.partition
+                );
+                let tp_offset = TopicPartition {
+                    topic: commit_topic,
+                    partition: tp.partition,
+                };
+                let offset_log = MessageLog::new(&tp_offset, false);
+                if offset_log.is_ok() {
+                    let mut offset_log = offset_log.unwrap();
+                    let offset_message = offset_log.get_message(0);
+                    if offset_message.is_ok() {
+                        let offset_message = offset_message.unwrap();
+                        let record: OffsetRecord =
+                            serde_json::from_slice(&offset_message.payload[..]).unwrap(); // Don't unwrap...
+                        let info = msg_log.get_index(record.offset).unwrap(); // XXX don't unwrap...
+                        if let Err(_) = tx
+                            .send(ClientMessage::MessageBatch(
+                                msg_log.log_file_name(),
+                                info.position,
+                                msg_log.log_file_end() - info.position,
+                            ))
+                            .await
+                        {
+                            // XXX Remove bad client.
+                        }
+                    } else {
+                        error!(
+                            "Error retrieving consumer offset: {}",
+                            offset_message.unwrap_err()
+                        );
+                    }
+                } else {
+                    error!(
+                        "Error retrieving consumer offset log: {}",
+                        offset_log.unwrap_err()
+                    );
                 }
                 client_tx.insert(client_name.to_string(), tx.clone());
             }

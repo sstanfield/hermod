@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::error::Error;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -21,23 +20,34 @@ use super::types::*;
 
 use log::{error, info};
 
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ClientIncoming {
+    Connect {
+        client_name: String,
+        group_id: String,
+        topics: Vec<String>,
+    },
+    Topics {
+        topics: Vec<String>,
+    },
+    Status {
+        status: String,
+    },
+    Commit {
+        topic: String,
+        partition: u64,
+        commit_offset: u64,
+    },
+}
+
 fn decode(buf: &mut BytesMut) -> Result<Option<ClientIncoming>, io::Error> {
     let mut result: Result<Option<ClientIncoming>, io::Error> = Ok(None);
     if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
         buf.advance(first_brace);
         let line = buf.split_to(message_offset + 1);
-        let line_str: String;
-        match str::from_utf8(&line[..]) {
-            Ok(str) => line_str = str.to_string(),
-            Err(err) => return Err(io::Error::new(io::ErrorKind::Other, err.description())),
-        }
-        if line_str.to_lowercase().contains("topics") {
-            let topics: ClientTopics = serde_json::from_slice(&line[..])?;
-            result = Ok(Some(ClientIncoming::Topic(topics)));
-        } else {
-            let status: Status = serde_json::from_slice(&line[..])?;
-            result = Ok(Some(ClientIncoming::Status(status)));
-        }
+        let incoming = serde_json::from_slice(&line[..])?;
+        result = Ok(Some(incoming));
     }
     result
 }
@@ -129,7 +139,7 @@ async fn client_incoming(
                                     leftover_bytes = in_bytes.len();
                                 }
                             }
-                            Ok(Some(ClientIncoming::Status(status))) => {
+                            Ok(Some(ClientIncoming::Status { status })) => {
                                 if let Err(_) = message_incoming_tx
                                     .send(ClientMessage::IncomingStatus(status))
                                     .await
@@ -140,9 +150,14 @@ async fn client_incoming(
                                     decoding = true;
                                 }
                             }
-                            Ok(Some(ClientIncoming::Topic(topic))) => {
-                                if let Err(_) =
-                                    message_incoming_tx.send(ClientMessage::Topic(topic)).await
+                            Ok(Some(ClientIncoming::Connect {
+                                client_name,
+                                group_id,
+                                topics,
+                            })) => {
+                                if let Err(_) = message_incoming_tx
+                                    .send(ClientMessage::Connect(client_name, group_id, topics))
+                                    .await
                                 {
                                     error!("Error sending client connect, closing connection!");
                                     cont = false;
@@ -157,6 +172,40 @@ async fn client_incoming(
                                         cont = false;
                                         decoding = false;
                                     }
+                                }
+                            }
+                            Ok(Some(ClientIncoming::Topics { topics })) => {
+                                if let Err(_) =
+                                    message_incoming_tx.send(ClientMessage::Topic(topics)).await
+                                {
+                                    error!("Error sending client topics, closing connection!");
+                                    cont = false;
+                                } else {
+                                    decoding = true;
+                                    if let Err(_) =
+                                        message_incoming_tx.send(ClientMessage::StatusOk).await
+                                    {
+                                        error!(
+                                            "Error sending client status ok, closing connection!"
+                                        );
+                                        cont = false;
+                                        decoding = false;
+                                    }
+                                }
+                            }
+                            Ok(Some(ClientIncoming::Commit {
+                                topic,
+                                partition,
+                                commit_offset,
+                            })) => {
+                                if let Err(_) = message_incoming_tx
+                                    .send(ClientMessage::Commit(topic, partition, commit_offset))
+                                    .await
+                                {
+                                    error!(
+                                        "Error sending client commit offset, closing connection!"
+                                    );
+                                    cont = false;
                                 }
                             }
                             Err(_) => {
@@ -204,6 +253,10 @@ async fn send_messages(
     while left > 0 {
         let buf_len = if left < buf_size { left } else { buf_size };
         match file.read(&mut buf[..buf_len]) {
+            Ok(0) => {
+                error!("Failed to read log file.");
+                break;
+            }
             Ok(bytes) => {
                 writer.write_all(&buf[..bytes]).await.unwrap(); // XXX no unwrap...
                 left -= bytes;
@@ -229,6 +282,8 @@ async fn message_incoming(
     let broker_tx = &broker_tx;
     let mut cont = true;
     let mut message = rx.next().await;
+    let mut client_name = format!("Client_{}", idx);
+    let mut group_id: Option<String> = None;
     while cont && message.is_some() {
         let mes = message.clone().unwrap();
         let broker_tx = broker_tx.clone();
@@ -271,9 +326,10 @@ async fn message_incoming(
                     .unwrap()
                     .await;
             }
-            ClientMessage::Topic(topics) => {
-                let client_name = format!("Client_{}", idx);
-                for topic in topics.topics {
+            ClientMessage::Connect(name, gid, topics) => {
+                client_name = name;
+                group_id = Some(gid);
+                for topic in topics {
                     let tp = TopicPartition {
                         partition: 0,
                         topic,
@@ -284,6 +340,41 @@ async fn message_incoming(
                     if let Err(_) = tx
                         .send(BrokerMessage::NewClient(
                             client_name.to_string(),
+                            group_id.clone().unwrap(),
+                            broker_tx.clone(),
+                        ))
+                        .await
+                    {
+                        error!("Error sending message to broker, close client.");
+                        cont = false;
+                    }
+                }
+            }
+            ClientMessage::Topic(topics) => {
+                if group_id.is_none() {
+                    let v = format!(
+                        "{{ \"status\": \"ERROR\", \"code\": {}, \"message\": \"{}\" }}",
+                        503, "Client initialized, closing connection!"
+                    );
+                    if let Err(_) = writer.write_all(v.as_bytes()).await {
+                        error!("Error writing to client, closing!");
+                    }
+                    error!("Error client tried to set topics with no group id, close client.");
+                    cont = false;
+                    continue;
+                }
+                for topic in topics {
+                    let tp = TopicPartition {
+                        partition: 0,
+                        topic,
+                    };
+                    let tx = broker_tx_cache
+                        .entry(tp.clone())
+                        .or_insert(broker_manager.get_broker_tx(tp.clone()).await.unwrap());
+                    if let Err(_) = tx
+                        .send(BrokerMessage::NewClient(
+                            client_name.to_string(),
+                            group_id.clone().unwrap(),
                             broker_tx.clone(),
                         ))
                         .await
@@ -294,9 +385,51 @@ async fn message_incoming(
                 }
             }
             ClientMessage::IncomingStatus(status) => {
-                if status.status.to_lowercase().eq("close") {
+                if status.to_lowercase().eq("close") {
                     info!("Client close request.");
                     rx.close();
+                }
+            }
+            ClientMessage::Commit(topic, partition, commit_offset) => {
+                // XXX should check that the topic/partition are in use by this client.
+                if group_id.is_none() {
+                    let v = format!(
+                        "{{ \"status\": \"ERROR\", \"code\": {}, \"message\": \"{}\" }}",
+                        503, "Client initialized, closing connection!"
+                    );
+                    if let Err(_) = writer.write_all(v.as_bytes()).await {
+                        error!("Error writing to client, closing!");
+                    }
+                    error!("Error client tried to set topics with no group id, close client.");
+                    cont = false;
+                    continue;
+                }
+                let group_id = group_id.clone().unwrap();
+                let commit_topic =
+                    format!("__consumer_offsets-{}-{}-{}", group_id, topic, partition);
+                let tp = TopicPartition {
+                    partition: 0,
+                    topic: commit_topic.clone(),
+                };
+                let tx = broker_tx_cache
+                    .entry(tp.clone())
+                    .or_insert(broker_manager.get_broker_tx(tp.clone()).await.unwrap());
+                let payload = format!(
+                    "{{\"group_id\": \"{}\", \"partition\": {}, \"topic\": \"{}\", \"offset\": {}}}",
+                    group_id, partition, topic, commit_offset
+                )
+                .into_bytes();
+                let message = Message {
+                    message_type: MessageType::Message,
+                    topic: commit_topic,
+                    payload_size: payload.len(),
+                    checksum: "".to_string(),
+                    sequence: 0,
+                    payload,
+                };
+                if let Err(error) = tx.send(BrokerMessage::Message(message)).await {
+                    error!("Error sending to broker: {}", error);
+                    cont = false;
                 }
             }
         };
