@@ -142,10 +142,15 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                     return;
                 }
 
-                for tx in client_tx.values_mut() {
+                let mut bad_clients = Vec::<String>::new();
+                for tx_key in client_tx.keys() {
+                    let mut tx = client_tx.get(tx_key).unwrap().clone();
                     if let Err(_) = tx.send(ClientMessage::Message(message.clone())).await {
-                        // XXX Remove bad client.
+                        bad_clients.push(tx_key.clone());
                     }
+                }
+                for bad_client in bad_clients {
+                    client_tx.remove(&bad_client);
                 }
             }
             BrokerMessage::NewClient(client_name, group_id, mut tx) => {
@@ -158,6 +163,7 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                     partition: tp.partition,
                 };
                 let offset_log = MessageLog::new(&tp_offset, false);
+                let mut bad_client = false;
                 if offset_log.is_ok() {
                     let mut offset_log = offset_log.unwrap();
                     let offset_message = offset_log.get_message(0);
@@ -166,7 +172,7 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                         let record: OffsetRecord =
                             serde_json::from_slice(&offset_message.payload[..]).unwrap(); // Don't unwrap...
                         let info = msg_log.get_index(record.offset).unwrap(); // XXX don't unwrap...
-                        if let Err(_) = tx
+                        if let Err(error) = tx
                             .send(ClientMessage::MessageBatch(
                                 msg_log.log_file_name(),
                                 info.position,
@@ -174,7 +180,8 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                             ))
                             .await
                         {
-                            // XXX Remove bad client.
+                            bad_client = true;
+                            error!("Error sending to new client, dropping: {}", error);
                         }
                     } else {
                         error!(
@@ -188,7 +195,9 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                         offset_log.unwrap_err()
                     );
                 }
-                client_tx.insert(client_name.to_string(), tx.clone());
+                if !bad_client {
+                    client_tx.insert(client_name.to_string(), tx.clone());
+                }
             }
             BrokerMessage::CloseClient(client_name) => {
                 client_tx.remove(&client_name);
