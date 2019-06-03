@@ -43,8 +43,10 @@ impl BrokerManager {
                 tp.partition, tp.topic
             );
         }
+        let mut hm = HashMap::new();
+        hm.insert(tp, topic_online_tx.clone());
         BrokerManager {
-            brokers: Mutex::new((HashMap::new(), threadpool, topic_online_tx)),
+            brokers: Mutex::new((hm, threadpool, topic_online_tx)),
         }
     }
 
@@ -129,7 +131,11 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
         return;
     }
     let mut msg_log = msg_log.unwrap();
-    let mut client_tx: HashMap<String, mpsc::Sender<ClientMessage>> = HashMap::new();
+    struct ClientInfo {
+        tx: mpsc::Sender<ClientMessage>,
+        is_internal: bool,
+    }
+    let mut client_tx: HashMap<String, ClientInfo> = HashMap::new();
     let mut message = rx.next().await;
     while message.is_some() {
         let mes = message.clone().unwrap();
@@ -144,8 +150,15 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
 
                 let mut bad_clients = Vec::<String>::new();
                 for tx_key in client_tx.keys() {
-                    let mut tx = client_tx.get(tx_key).unwrap().clone();
-                    if let Err(_) = tx.send(ClientMessage::Message(message.clone())).await {
+                    let client = client_tx.get(tx_key).unwrap();
+                    let mut tx = client.tx.clone();
+                    let is_internal = client.is_internal;
+                    let message = if is_internal {
+                        ClientMessage::InternalMessage(message.clone())
+                    } else {
+                        ClientMessage::Message(message.clone())
+                    };
+                    if let Err(_) = tx.send(message).await {
                         bad_clients.push(tx_key.clone());
                     }
                 }
@@ -153,7 +166,7 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                     client_tx.remove(&bad_client);
                 }
             }
-            BrokerMessage::NewClient(client_name, group_id, mut tx) => {
+            BrokerMessage::NewClient(client_name, group_id, mut tx, is_internal) => {
                 let commit_topic = format!(
                     "__consumer_offsets-{}-{}-{}",
                     group_id, tp.topic, tp.partition
@@ -196,7 +209,13 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                     );
                 }
                 if !bad_client {
-                    client_tx.insert(client_name.to_string(), tx.clone());
+                    client_tx.insert(
+                        client_name.to_string(),
+                        ClientInfo {
+                            tx: tx.clone(),
+                            is_internal,
+                        },
+                    );
                 }
             }
             BrokerMessage::CloseClient(client_name) => {

@@ -22,6 +22,7 @@ pub enum ClientMessage {
     StatusOk,
     StatusError(u32, String),
     Message(Message),
+    InternalMessage(Message),
     MessageBatch(String, u64, u64),
     Over,
     Connect(String, String, Vec<String>),
@@ -33,7 +34,7 @@ pub enum ClientMessage {
 #[derive(Clone)]
 pub enum BrokerMessage {
     Message(Message),
-    NewClient(String, String, mpsc::Sender<ClientMessage>),
+    NewClient(String, String, mpsc::Sender<ClientMessage>, bool),
     CloseClient(String),
 }
 

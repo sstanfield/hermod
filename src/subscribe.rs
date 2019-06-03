@@ -308,6 +308,9 @@ async fn message_incoming(
                     cont = false;
                 }
             }
+            ClientMessage::InternalMessage(message) => {
+                //println!("XXXX internal {}: {}", message.topic, std::str::from_utf8(&message.payload[..]).unwrap());
+            }
             ClientMessage::Message(message) => {
                 let v = format!("{{ \"topic\": \"{}\", \"payload_size\": {}, \"checksum\": \"{}\", \"sequence\": {} }}",
                                    message.topic, message.payload_size, message.checksum, message.sequence);
@@ -343,6 +346,27 @@ async fn message_incoming(
                                 client_name.to_string(),
                                 group_id.clone().unwrap(),
                                 broker_tx.clone(),
+                                false,
+                            ))
+                            .await
+                        {
+                            error!("Error sending message to broker, close client.");
+                            cont = false;
+                        }
+                        // XXX refactor!
+                        let tp = TopicPartition {
+                            partition: 0,
+                            topic: "__topic_online".to_string(),
+                        };
+                        let tx = broker_tx_cache
+                            .entry(tp.clone())
+                            .or_insert(broker_manager.get_broker_tx(tp.clone()).await.unwrap());
+                        if let Err(_) = tx
+                            .send(BrokerMessage::NewClient(
+                                client_name.to_string(),
+                                group_id.clone().unwrap(),
+                                broker_tx.clone(),
+                                true,
                             ))
                             .await
                         {
@@ -378,6 +402,7 @@ async fn message_incoming(
                             client_name.to_string(),
                             group_id.clone().unwrap(),
                             broker_tx.clone(),
+                            false,
                         ))
                         .await
                     {
