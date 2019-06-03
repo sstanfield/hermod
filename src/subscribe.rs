@@ -330,23 +330,25 @@ async fn message_incoming(
                 client_name = name;
                 group_id = Some(gid);
                 for topic in topics {
-                    let tp = TopicPartition {
-                        partition: 0,
-                        topic,
-                    };
-                    let tx = broker_tx_cache
-                        .entry(tp.clone())
-                        .or_insert(broker_manager.get_broker_tx(tp.clone()).await.unwrap());
-                    if let Err(_) = tx
-                        .send(BrokerMessage::NewClient(
-                            client_name.to_string(),
-                            group_id.clone().unwrap(),
-                            broker_tx.clone(),
-                        ))
-                        .await
-                    {
-                        error!("Error sending message to broker, close client.");
-                        cont = false;
+                    for topic in broker_manager.expand_topics(topic).await {
+                        let tp = TopicPartition {
+                            partition: 0,
+                            topic,
+                        };
+                        let tx = broker_tx_cache
+                            .entry(tp.clone())
+                            .or_insert(broker_manager.get_broker_tx(tp.clone()).await.unwrap());
+                        if let Err(_) = tx
+                            .send(BrokerMessage::NewClient(
+                                client_name.to_string(),
+                                group_id.clone().unwrap(),
+                                broker_tx.clone(),
+                            ))
+                            .await
+                        {
+                            error!("Error sending message to broker, close client.");
+                            cont = false;
+                        }
                     }
                 }
             }

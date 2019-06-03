@@ -48,6 +48,29 @@ impl BrokerManager {
         }
     }
 
+    pub async fn expand_topics(&self, topic_name: String) -> Vec<String> {
+        let mut result = Vec::<String>::new();
+        if topic_name.trim().ends_with("*") {
+            let len = topic_name.len();
+            let mut data = self.brokers.lock().await;
+            let brokers = &mut data.0;
+            if len == 1 {
+                for key in brokers.keys() {
+                    result.push(key.topic.clone());
+                }
+            } else {
+                for key in brokers.keys() {
+                    if key.topic.starts_with(&topic_name[..len - 1]) {
+                        result.push(key.topic.clone());
+                    }
+                }
+            }
+        } else {
+            result.push(topic_name);
+        }
+        result
+    }
+
     pub async fn get_broker_tx(
         &self,
         tp: TopicPartition,
