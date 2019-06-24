@@ -16,6 +16,7 @@ use super::super::broker::*;
 use super::super::types::*;
 
 use log::{error, info};
+
 macro_rules! get_broker_tx {
     ($self:expr, $partition:expr, $topic:expr, $tx:expr) => {
         let tp = TopicPartition {
@@ -69,8 +70,7 @@ impl MessageCore {
         broker_manager: Arc<BrokerManager>,
         io_pool: ThreadPool,
     ) -> MessageCore {
-        let broker_tx_cache: HashMap<TopicPartition, mpsc::Sender<BrokerMessage>> =
-            HashMap::new();
+        let broker_tx_cache: HashMap<TopicPartition, mpsc::Sender<BrokerMessage>> = HashMap::new();
         let client_name = format!("Client_{}", idx);
         let group_id: Option<String> = None;
         MessageCore {
@@ -117,10 +117,7 @@ impl MessageCore {
         writer
     }
 
-    pub async fn message_incoming(
-        &mut self,
-        mut writer: WriteHalf<TcpStream>,
-    ) {
+    pub async fn message_incoming(&mut self, mut writer: WriteHalf<TcpStream>) {
         let mut message = self.rx.next().await;
         while self.running && message.is_some() {
             let mes = message.clone().unwrap();
@@ -161,7 +158,8 @@ impl MessageCore {
                     }
                 }
                 ClientMessage::MessageBatch(file_name, start, length) => {
-                    writer = self.io_pool
+                    writer = self
+                        .io_pool
                         .spawn_with_handle(MessageCore::send_messages(
                             writer,
                             file_name.clone(),
@@ -209,7 +207,7 @@ impl MessageCore {
                     if self.group_id.is_none() {
                         let v = format!(
                             "{{ \"status\": \"ERROR\", \"code\": {}, \"message\": \"{}\" }}",
-                            503, "Client initialized, closing connection!"
+                            503, "Client not initialized, closing connection!"
                         );
                         if let Err(_) = writer.write_all(v.as_bytes()).await {
                             error!("Error writing to client, closing!");

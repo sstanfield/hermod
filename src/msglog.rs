@@ -66,31 +66,23 @@ pub struct MessageLog {
 
 impl MessageLog {
     pub fn new(tp: &TopicPartition, single_record: bool) -> io::Result<MessageLog> {
-        let log_file_name = format!("{}.{}.log", tp.topic, tp.partition);
-        let mut log_append = if single_record {
-            File::create(&log_file_name)?
-        } else {
-            OpenOptions::new()
-                .read(false)
-                .write(true)
-                .append(true)
-                .create(true)
-                .open(&log_file_name)?
-        };
+        let log_file_name = format!("logs/{}.{}.log", tp.topic, tp.partition);
+        let mut log_append = OpenOptions::new()
+            .read(false)
+            .write(true)
+            .append(true)
+            .create(true)
+            .open(&log_file_name)?;
         log_append.seek(SeekFrom::End(0))?;
         let log_end = log_append.seek(SeekFrom::Current(0))?;
 
-        let log_file_idx_name = format!("{}.{}.idx", tp.topic, tp.partition);
-        let mut idx_append = if single_record {
-            File::create(&log_file_idx_name)?
-        } else {
-            OpenOptions::new()
-                .read(false)
-                .write(true)
-                .append(true)
-                .create(true)
-                .open(&log_file_idx_name)?
-        };
+        let log_file_idx_name = format!("logs/{}.{}.idx", tp.topic, tp.partition);
+        let mut idx_append = OpenOptions::new()
+            .read(false)
+            .write(true)
+            .append(true)
+            .create(true)
+            .open(&log_file_idx_name)?;
         idx_append.seek(SeekFrom::End(0))?;
         let idx_end = idx_append.seek(SeekFrom::Current(0))?;
         let mut idx_read = File::open(&log_file_idx_name)?;
@@ -123,6 +115,7 @@ impl MessageLog {
             message.topic, message.payload_size, message.checksum, message.sequence
         );
         if self.single_record {
+            // XXX need to truncate here?  Probably does not matter.
             self.log_append.seek(SeekFrom::Start(0))?;
             self.log_append.set_len(0)?;
             self.idx_append.seek(SeekFrom::Start(0))?;
@@ -165,20 +158,19 @@ impl MessageLog {
     pub fn get_message(&mut self, offset: u64) -> io::Result<Message> {
         let idx = self.get_index(offset)?;
         let mut log_read = File::open(&self.log_file_name)?;
-        log_read.seek(SeekFrom::Start(idx.position))?;
-        let mut buf = vec![0; idx.size];
+        if self.single_record {
+            log_read.seek(SeekFrom::Start(0))?;
+        } else {
+            log_read.seek(SeekFrom::Start(idx.position))?;
+        }
+        let mut buf = vec![b'\0'; idx.size];
         let mut start = 0;
         let mut cont = true;
         while cont {
             cont = false;
             match log_read.read(&mut buf[start..]) {
-                Ok(0) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        "Failed to read the message from log!",
-                    ));
-                }
                 Ok(bytes) => {
+                    let bytes = if bytes == 0 { idx.size } else { bytes };
                     if (bytes + start) < idx.size {
                         start = bytes;
                         cont = true;
@@ -191,7 +183,6 @@ impl MessageLog {
                 }
             }
         }
-        //println!("XXXX buf: {}", std::str::from_utf8(&buf[..]).unwrap());
         if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
             let message: MessageFromLog =
                 serde_json::from_slice(&buf[first_brace..message_offset + 1])?;

@@ -144,7 +144,7 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                 message.sequence = msg_log.offset();
 
                 if let Err(error) = msg_log.append(&message) {
-                    error!("Failed to message log {}", error);
+                    error!("Failed to write message to log {}", error);
                     return;
                 }
 
@@ -175,7 +175,7 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                     topic: commit_topic,
                     partition: tp.partition,
                 };
-                let offset_log = MessageLog::new(&tp_offset, false);
+                let offset_log = MessageLog::new(&tp_offset, true);
                 let mut bad_client = false;
                 if offset_log.is_ok() {
                     let mut offset_log = offset_log.unwrap();
@@ -183,18 +183,21 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                     if offset_message.is_ok() {
                         let offset_message = offset_message.unwrap();
                         let record: OffsetRecord =
-                            serde_json::from_slice(&offset_message.payload[..]).unwrap(); // Don't unwrap...
-                        let info = msg_log.get_index(record.offset).unwrap(); // XXX don't unwrap...
-                        if let Err(error) = tx
-                            .send(ClientMessage::MessageBatch(
-                                msg_log.log_file_name(),
-                                info.position,
-                                msg_log.log_file_end() - info.position,
-                            ))
-                            .await
-                        {
-                            bad_client = true;
-                            error!("Error sending to new client, dropping: {}", error);
+                            serde_json::from_slice(&offset_message.payload[..]).unwrap(); // XXX TODO Don't unwrap...
+                        let info = msg_log.get_index(record.offset + 1);
+                        if (info.is_ok()) {
+                            let info = info.unwrap();
+                            if let Err(error) = tx
+                                .send(ClientMessage::MessageBatch(
+                                    msg_log.log_file_name(),
+                                    info.position,
+                                    msg_log.log_file_end() - info.position,
+                                ))
+                                .await
+                            {
+                                bad_client = true;
+                                error!("Error sending to new client, dropping: {}", error);
+                            }
                         }
                     } else {
                         error!(

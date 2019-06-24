@@ -236,7 +236,7 @@ async fn client_incoming(
 }
 
 pub mod message_core;
-pub use crate::message_core::*;
+use crate::message_core::*;
 
 async fn new_sub_client(
     stream: TcpStream,
