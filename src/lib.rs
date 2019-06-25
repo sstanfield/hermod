@@ -12,8 +12,8 @@ pub use crate::common::*;
 pub mod publish;
 pub use crate::publish::*;
 
-pub mod subscribe;
-pub use crate::subscribe::*;
+pub mod client;
+pub use crate::client::*;
 
 pub mod broker;
 pub use crate::broker::*;

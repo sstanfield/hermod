@@ -185,7 +185,7 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                         let record: OffsetRecord =
                             serde_json::from_slice(&offset_message.payload[..]).unwrap(); // XXX TODO Don't unwrap...
                         let info = msg_log.get_index(record.offset + 1);
-                        if (info.is_ok()) {
+                        if info.is_ok() {
                             let info = info.unwrap();
                             if let Err(error) = tx
                                 .send(ClientMessage::MessageBatch(
