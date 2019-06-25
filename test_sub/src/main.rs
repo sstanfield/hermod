@@ -295,7 +295,7 @@ fn main() -> io::Result<()> {
         .unwrap();
     executor::block_on(async {
         let mut last_sequence = 0;
-        let mut client = Client::connect("127.0.0.1".to_string(), 7879)
+        let mut client = Client::connect("127.0.0.1".to_string(), 7878)
             .await
             .unwrap();
         loop {

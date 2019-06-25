@@ -1,13 +1,13 @@
 use futures::channel::mpsc;
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Deserialize, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum MessageType {
     Message,
     BatchMessage,
     BatchEnd { count: usize },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Deserialize, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Message {
     pub message_type: MessageType,
     pub topic: String,
@@ -29,6 +29,7 @@ pub enum ClientMessage {
     Topic(Vec<String>),
     IncomingStatus(String),
     Commit(String, u64, u64),
+    PublishMessage(Message),
 }
 
 #[derive(Clone)]

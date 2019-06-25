@@ -228,10 +228,8 @@ impl MessageCore {
                         .entry(tp.clone())
                         .or_insert(self.broker_manager.get_broker_tx(tp.clone()).await.unwrap());
                     let payload = format!(
-                    "{{\"group_id\": \"{}\", \"partition\": {}, \"topic\": \"{}\", \"offset\": {}}}",
-                    group_id, partition, topic, commit_offset
-                )
-                .into_bytes();
+                        "{{\"group_id\": \"{}\", \"partition\": {}, \"topic\": \"{}\", \"offset\": {}}}",
+                        group_id, partition, topic, commit_offset).into_bytes();
                     let message = Message {
                         message_type: MessageType::Message,
                         topic: commit_topic,
@@ -240,6 +238,19 @@ impl MessageCore {
                         sequence: 0,
                         payload,
                     };
+                    if let Err(error) = tx.send(BrokerMessage::Message(message)).await {
+                        error!("Error sending to broker: {}", error);
+                        self.running = false;
+                    }
+                }
+                ClientMessage::PublishMessage(message) => {
+                    let tp = TopicPartition {
+                        partition: 0,
+                        topic: message.topic.clone(),
+                    };
+                    let tx = self.broker_tx_cache
+                        .entry(tp.clone())
+                        .or_insert(self.broker_manager.get_broker_tx(tp.clone()).await.unwrap());
                     if let Err(error) = tx.send(BrokerMessage::Message(message)).await {
                         error!("Error sending to broker: {}", error);
                         self.running = false;

@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::io;
 
 use futures::channel::mpsc;
 use futures::executor::ThreadPool;
@@ -12,30 +11,28 @@ use romio::{TcpListener, TcpStream};
 use super::broker::*;
 use super::types::*;
 
-use log::{info};
-
+use log::info;
 
 pub mod read_input;
 use crate::read_input::*;
 pub mod message_core;
 use crate::message_core::*;
 
-
-async fn start_sub(
+pub async fn start_client(
     mut threadpool: ThreadPool,
     mut io_pool: ThreadPool,
     broker_manager: Arc<BrokerManager>,
-) -> io::Result<()> {
-    let mut listener = TcpListener::bind(&"127.0.0.1:7879".parse().unwrap())?;
+) {
+    let mut listener = TcpListener::bind(&"127.0.0.1:7878".parse().unwrap()).expect("Unable to bind to 127.0.0.1:7878");
     let mut incoming = listener.incoming();
 
-    info!("Sub listening on 127.0.0.1:7879");
+    info!("Client listening on 127.0.0.1:7878");
     let mut connections = 0;
 
     while let Some(stream) = incoming.next().await {
         threadpool
-            .spawn(new_sub_client(
-                stream?,
+            .spawn(new_client(
+                stream.unwrap(),
                 connections,
                 broker_manager.clone(),
                 threadpool.clone(),
@@ -44,20 +41,9 @@ async fn start_sub(
             .unwrap();
         connections += 1;
     }
-    Ok(())
 }
 
-pub async fn start_sub_empty(
-    threadpool: ThreadPool,
-    io_pool: ThreadPool,
-    broker_manager: Arc<BrokerManager>,
-) {
-    start_sub(threadpool, io_pool, broker_manager)
-        .await
-        .unwrap();
-}
-
-async fn new_sub_client(
+async fn new_client(
     stream: TcpStream,
     idx: u64,
     broker_manager: Arc<BrokerManager>,
