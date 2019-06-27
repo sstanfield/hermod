@@ -248,12 +248,34 @@ impl MessageCore {
                         partition: 0,
                         topic: message.topic.clone(),
                     };
-                    let tx = self.broker_tx_cache
-                        .entry(tp.clone())
-                        .or_insert(self.broker_manager.get_broker_tx(tp.clone()).await.unwrap());
-                    if let Err(error) = tx.send(BrokerMessage::Message(message)).await {
-                        error!("Error sending to broker: {}", error);
-                        self.running = false;
+                    let message_type = message.message_type.clone();
+                    if message.payload_size > 0 {
+                        let tx = self.broker_tx_cache.entry(tp.clone()).or_insert(
+                            self.broker_manager.get_broker_tx(tp.clone()).await.unwrap(),
+                        );
+                        if let Err(error) = tx.send(BrokerMessage::Message(message)).await {
+                            error!("Error sending to broker: {}", error);
+                            self.running = false;
+                        }
+                    }
+                    match message_type {
+                        MessageType::Message => {
+                            let v = "{ \"status\": \"OK\"}";
+                            if let Err(_) = writer.write_all(v.as_bytes()).await {
+                                error!("Error writing to client, closing!");
+                                self.running = false;
+                            }
+                        }
+                        MessageType::BatchMessage => {
+                            // No feedback during a batch.
+                        }
+                        MessageType::BatchEnd { count } => {
+                            let v = format!("{{ \"status\": \"OK\", \"count\": {}}}", count);
+                            if let Err(_) = writer.write_all(v.as_bytes()).await {
+                                error!("Error writing to client, closing!");
+                                self.running = false;
+                            }
+                        }
                     }
                 }
             };

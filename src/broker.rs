@@ -36,7 +36,8 @@ impl BrokerManager {
             topic: "__topic_online".to_string(),
             partition: 0,
         };
-        let (topic_online_tx, rx) = mpsc::channel::<BrokerMessage>(10);
+        let (topic_online_tx, rx) = mpsc::channel::<BrokerMessage>(1000);
+        //let (topic_online_tx, rx) = mpsc::unbounded::<BrokerMessage>();
         if let Err(_) = threadpool.spawn(new_message_broker(rx, tp.clone())) {
             error!(
                 "Got error spawning task for partion {}, topic {}",
@@ -84,7 +85,8 @@ impl BrokerManager {
         if brokers.contains_key(&tp) {
             return Ok(brokers.get(&tp).unwrap().clone());
         }
-        let (tx, rx) = mpsc::channel::<BrokerMessage>(10);
+        let (tx, rx) = mpsc::channel::<BrokerMessage>(1000);
+        //let (tx, rx) = mpsc::unbounded::<BrokerMessage>();
         brokers.insert(tp.clone(), tx.clone());
         drop(brokers);
         let threadpool = &mut data.1;

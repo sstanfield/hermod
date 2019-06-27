@@ -115,7 +115,7 @@ impl InMessageCodec {
                     ClientIncoming::Batch { batch_type, count } => match batch_type {
                         BatchType::Start => {
                             self.in_batch = true;
-                            result = Ok(None);
+                            result = Ok(Some(ClientIncoming::Batch { batch_type, count }));
                         }
                         BatchType::End => {
                             self.in_batch = false;
@@ -137,7 +137,7 @@ impl InMessageCodec {
                             self.in_batch = true;
                             self.batch_count = 0;
                             self.expected_batch_count = count;
-                            result = Ok(None);
+                            result = Ok(Some(ClientIncoming::Batch { batch_type, count }));
                         }
                     },
                     ClientIncoming::MessageOut { message: _ } => {
@@ -166,17 +166,6 @@ impl InMessageCodec {
         result
     }
 }
-
-/*fn decode(buf: &mut BytesMut) -> Result<Option<ClientIncoming>, io::Error> {
-    let mut result: Result<Option<ClientIncoming>, io::Error> = Ok(None);
-    if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
-        buf.advance(first_brace);
-        let line = buf.split_to(message_offset + 1);
-        let incoming = serde_json::from_slice(&line[..])?;
-        result = Ok(Some(incoming));
-    }
-    result
-}*/
 
 async fn send_client_error(
     mut message_incoming_tx: mpsc::Sender<ClientMessage>,
@@ -319,8 +308,8 @@ pub async fn client_incoming(
                                 batch_type: _,
                                 count: _,
                             })) => {
-                                error!("Leaked an incoming Batch message, fix me!");
-                                cont = false;
+                                // This is basically a no-op but need to keep decoding.
+                                decoding = true;
                             }
                             Err(_) => {
                                 error!("Error decoding client message, closing connection");
