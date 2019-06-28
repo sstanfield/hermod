@@ -199,7 +199,8 @@ impl Client {
         let (reader, mut writer) = stream.split();
         writer
             .write_all(
-                b"{\"client_name\": \"client1\", \"group_id\": \"g1\", \"topics\": [\"top1\"]}",
+                //b"{\"client_name\": \"client1\", \"group_id\": \"g1\", \"topics\": [\"top1\"]}",
+                b"{\"topics\": [\"top1\"]}",
             )
             .await?;
         //writer

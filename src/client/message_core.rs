@@ -181,19 +181,12 @@ impl MessageCore {
                 }
                 ClientMessage::Topic(topics) => {
                     if self.group_id.is_none() {
-                        let v = format!(
-                            "{{ \"status\": \"ERROR\", \"code\": {}, \"message\": \"{}\" }}",
-                            503, "Client initialized, closing connection!"
-                        );
-                        if let Err(_) = writer.write_all(v.as_bytes()).await {
-                            error!("Error writing to client, closing!");
-                        }
-                        error!("Error client tried to set topics with no group id, close client.");
-                        self.running = false;
-                        continue;
+                        self.client_name = "unk_client".to_string();
+                        self.group_id = Some("default_grp".to_string());
                     }
                     for topic in topics {
                         new_client!(self, 0, topic, false);
+                        new_client!(self, 0, "__topic_online".to_string(), true);
                     }
                 }
                 ClientMessage::IncomingStatus(status) => {
