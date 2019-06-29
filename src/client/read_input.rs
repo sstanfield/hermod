@@ -23,16 +23,29 @@ enum BatchType {
     Count,
 }
 
+#[derive(Deserialize, Clone, Debug)]
+enum TopicStartIn {
+    Earliest,
+    Latest,
+    Current,
+    Offset,
+}
+
 #[derive(Clone, Deserialize)]
-#[serde(untagged)]
 enum ClientIncoming {
     Connect {
         client_name: String,
         group_id: String,
-        topics: Vec<String>,
+        //topics: Vec<String>,
     },
-    Topics {
-        topics: Vec<String>,
+    Subscribe {
+        topic: String,
+        position: TopicStartIn,
+        #[serde(default = "zero_val")]
+        offset: usize,
+    },
+    Unsubscribe {
+        topic: String,
     },
     Status {
         status: String,
@@ -42,7 +55,7 @@ enum ClientIncoming {
         partition: u64,
         commit_offset: u64,
     },
-    PublishMessage {
+    Publish {
         topic: String,
         payload_size: usize,
         checksum: String,
@@ -80,10 +93,10 @@ impl InMessageCodec {
         if self.message.is_none() {
             if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
                 buf.advance(first_brace);
-                let line = buf.split_to(message_offset + 1);
+                let line = buf.split_to((message_offset - first_brace) + 1);
                 let incoming: ClientIncoming = serde_json::from_slice(&line[..])?;
                 match incoming {
-                    ClientIncoming::PublishMessage {
+                    ClientIncoming::Publish {
                         topic,
                         payload_size,
                         checksum,
@@ -180,6 +193,29 @@ async fn send_client_error(
     }
 }
 
+macro_rules! send {
+    ($tx:expr, $message:expr, $cont:expr, $error_msg:expr) => {
+        if let Err(_) = $tx.send($message).await {
+            error!($error_msg);
+            $cont = false;
+        }
+    };
+}
+
+macro_rules! send_with_status_ok {
+    ($tx:expr, $message:expr, $cont:expr, $error_msg:expr) => {
+        if let Err(_) = $tx.send($message).await {
+            error!($error_msg);
+            $cont = false;
+        } else {
+            if let Err(_) = $tx.send(ClientMessage::StatusOk).await {
+                error!("Error sending client status ok, closing connection!");
+                $cont = false;
+            }
+        }
+    };
+}
+
 pub async fn client_incoming(
     mut message_incoming_tx: mpsc::Sender<ClientMessage>,
     mut reader: ReadHalf<TcpStream>,
@@ -220,55 +256,53 @@ pub async fn client_incoming(
                                 }
                             }
                             Ok(Some(ClientIncoming::Status { status })) => {
-                                if let Err(_) = message_incoming_tx
-                                    .send(ClientMessage::IncomingStatus(status))
-                                    .await
-                                {
-                                    error!("Error sending client status, closing connection!");
-                                    cont = false;
-                                }
+                                send!(
+                                    message_incoming_tx,
+                                    ClientMessage::IncomingStatus(status),
+                                    cont,
+                                    "Error sending client status, closing connection!"
+                                );
                                 decoding = true;
                             }
                             Ok(Some(ClientIncoming::Connect {
                                 client_name,
                                 group_id,
-                                topics,
                             })) => {
-                                if let Err(_) = message_incoming_tx
-                                    .send(ClientMessage::Connect(client_name, group_id, topics))
-                                    .await
-                                {
-                                    error!("Error sending client connect, closing connection!");
-                                    cont = false;
-                                } else {
-                                    decoding = true;
-                                    if let Err(_) =
-                                        message_incoming_tx.send(ClientMessage::StatusOk).await
-                                    {
-                                        error!(
-                                            "Error sending client status ok, closing connection!"
-                                        );
-                                        cont = false;
-                                    }
-                                }
+                                send_with_status_ok!(
+                                    message_incoming_tx,
+                                    ClientMessage::Connect(client_name, group_id),
+                                    cont,
+                                    "Error sending client connect, closing connection!"
+                                );
+                                decoding = true;
                             }
-                            Ok(Some(ClientIncoming::Topics { topics })) => {
-                                if let Err(_) =
-                                    message_incoming_tx.send(ClientMessage::Topic(topics)).await
-                                {
-                                    error!("Error sending client topics, closing connection!");
-                                    cont = false;
-                                } else {
-                                    decoding = true;
-                                    if let Err(_) =
-                                        message_incoming_tx.send(ClientMessage::StatusOk).await
-                                    {
-                                        error!(
-                                            "Error sending client status ok, closing connection!"
-                                        );
-                                        cont = false;
-                                    }
-                                }
+                            Ok(Some(ClientIncoming::Subscribe {
+                                topic,
+                                position,
+                                offset,
+                            })) => {
+                                let new_pos = match position {
+                                    TopicStartIn::Earliest => TopicStart::Earliest,
+                                    TopicStartIn::Latest => TopicStart::Latest,
+                                    TopicStartIn::Current => TopicStart::Current,
+                                    TopicStartIn::Offset => TopicStart::Offset { offset },
+                                };
+                                send_with_status_ok!(
+                                    message_incoming_tx,
+                                    ClientMessage::Subscribe { topic, position: new_pos },
+                                    cont,
+                                    "Error subscribing client to topic, closing connection!"
+                                );
+                                decoding = true;
+                            }
+                            Ok(Some(ClientIncoming::Unsubscribe { topic })) => {
+                                send_with_status_ok!(
+                                    message_incoming_tx,
+                                    ClientMessage::Unsubscribe { topic },
+                                    cont,
+                                    "Error unsubscribing client to topic, closing connection!"
+                                );
+                                decoding = true;
                             }
                             Ok(Some(ClientIncoming::Commit {
                                 topic,
@@ -276,27 +310,23 @@ pub async fn client_incoming(
                                 commit_offset,
                             })) => {
                                 decoding = true;
-                                if let Err(_) = message_incoming_tx
-                                    .send(ClientMessage::Commit(topic, partition, commit_offset))
-                                    .await
-                                {
-                                    error!(
-                                        "Error sending client commit offset, closing connection!"
-                                    );
-                                    cont = false;
-                                }
+                                send!(
+                                    message_incoming_tx,
+                                    ClientMessage::Commit(topic, partition, commit_offset),
+                                    cont,
+                                    "Error sending client commit offset, closing connection!"
+                                );
                             }
                             Ok(Some(ClientIncoming::MessageOut { message })) => {
                                 decoding = true;
-                                if let Err(_) = message_incoming_tx
-                                    .send(ClientMessage::PublishMessage(message))
-                                    .await
-                                {
-                                    error!("Error sending publishing message, closing connection!");
-                                    cont = false;
-                                }
+                                send!(
+                                    message_incoming_tx,
+                                    ClientMessage::PublishMessage(message),
+                                    cont,
+                                    "Error sending publishing message, closing connection!"
+                                );
                             }
-                            Ok(Some(ClientIncoming::PublishMessage {
+                            Ok(Some(ClientIncoming::Publish {
                                 topic: _,
                                 payload_size: _,
                                 checksum: _,
@@ -311,8 +341,8 @@ pub async fn client_incoming(
                                 // This is basically a no-op but need to keep decoding.
                                 decoding = true;
                             }
-                            Err(_) => {
-                                error!("Error decoding client message, closing connection");
+                            Err(error) => {
+                                error!("Error decoding client message, closing connection: {}", error);
                                 cont = false;
                                 send_client_error(
                                     message_incoming_tx.clone(),

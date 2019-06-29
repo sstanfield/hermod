@@ -199,8 +199,14 @@ impl Client {
         let (reader, mut writer) = stream.split();
         writer
             .write_all(
-                //b"{\"client_name\": \"client1\", \"group_id\": \"g1\", \"topics\": [\"top1\"]}",
-                b"{\"topics\": [\"top1\"]}",
+//                b"{\"client_name\": \"client1\", \"group_id\": \"g1\", \"topics\": [\"top1\"]}",
+                b"{\"Connect\": {\"client_name\": \"client1\", \"group_id\": \"g1\"}}",
+            )
+            .await?;
+        writer
+            .write_all(
+//                b"{\"client_name\": \"client1\", \"group_id\": \"g1\", \"topics\": [\"top1\"]}",
+                b"{\"Subscribe\": {\"topic\": \"top1\", \"position\": \"Current\"}}",
             )
             .await?;
         //writer
@@ -229,7 +235,7 @@ impl Client {
     }
 
     async fn commit_offset(&mut self, topic: String, partition: u64, offset: u64) -> io::Result<()> {
-        let message = format!("{{\"topic\": \"{}\", \"partition\": {}, \"commit_offset\": {}}}", topic, partition, offset);
+        let message = format!("{{\"Commit\": {{\"topic\": \"{}\", \"partition\": {}, \"commit_offset\": {}}}}}", topic, partition, offset);
         println!("XXX committing: {}", message);
         self.writer.write_all(message.as_bytes()).await?;
         Ok(())

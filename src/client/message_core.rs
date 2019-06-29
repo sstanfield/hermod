@@ -169,26 +169,18 @@ impl MessageCore {
                         .unwrap()
                         .await;
                 }
-                ClientMessage::Connect(name, gid, topics) => {
+                ClientMessage::Connect(name, gid) => {
                     self.client_name = name;
                     self.group_id = Some(gid);
-                    for topic in topics {
-                        for topic in self.broker_manager.expand_topics(topic).await {
-                            new_client!(self, 0, topic, false);
-                            new_client!(self, 0, "__topic_online".to_string(), true);
-                        }
-                    }
                 }
-                ClientMessage::Topic(topics) => {
-                    if self.group_id.is_none() {
-                        self.client_name = "unk_client".to_string();
-                        self.group_id = Some("default_grp".to_string());
-                    }
-                    for topic in topics {
+                ClientMessage::Subscribe { topic, position: _ } => {
+                    // XXX Validate connection.
+                    for topic in self.broker_manager.expand_topics(topic).await {
                         new_client!(self, 0, topic, false);
                         new_client!(self, 0, "__topic_online".to_string(), true);
                     }
                 }
+                ClientMessage::Unsubscribe { topic: _ } => {}
                 ClientMessage::IncomingStatus(status) => {
                     if status.to_lowercase().eq("close") {
                         info!("Client close request.");

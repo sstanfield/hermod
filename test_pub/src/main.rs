@@ -13,16 +13,16 @@ fn main() -> io::Result<()> {
         let mut stdout = AllowStdIo::new(io::stdout());
         for n in 0..10000 {
             if n > 0 && n % 1000 == 0 {
-                let mes = format!("{{\"batch_type\": \"End\"}}");
+                let mes = format!("{{\"Batch\": {{\"batch_type\": \"End\"}}}}");
                 stream.write_all(mes.as_bytes()).await?;
             }
             if n % 1000 == 0 {
                 //let mes = format!("{{\"batch_type\": \"Count\", \"count\": 100}}");
-                let mes = format!("{{\"batch_type\": \"Start\"}}");
+                let mes = format!("{{\"Batch\": {{\"batch_type\": \"Start\"}}}}");
                 stream.write_all(mes.as_bytes()).await?;
             }
             let payload = format!("{}-{}\n", "sls", n);
-            let mes = format!("{{\"topic\": \"top1\", \"payload_size\": {}, \"checksum\": \"\"}}{}", payload.len(), payload);
+            let mes = format!("{{\"Publish\": {{\"topic\": \"top1\", \"payload_size\": {}, \"checksum\": \"\"}}}}{}", payload.len(), payload);
             stream.write_all(mes.as_bytes()).await?;
             //println!("XXXX n: {}", n);
         }

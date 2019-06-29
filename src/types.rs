@@ -18,6 +18,14 @@ pub struct Message {
 }
 
 #[derive(Clone)]
+pub enum TopicStart {
+    Earliest,
+    Latest,
+    Current,
+    Offset { offset: usize },
+}
+
+#[derive(Clone)]
 pub enum ClientMessage {
     StatusOk,
     StatusError(u32, String),
@@ -25,11 +33,12 @@ pub enum ClientMessage {
     InternalMessage(Message),
     MessageBatch(String, u64, u64),
     Over,
-    Connect(String, String, Vec<String>),
-    Topic(Vec<String>),
+    Connect(String, String), //, Vec<String>),
     IncomingStatus(String),
     Commit(String, u64, u64),
     PublishMessage(Message),
+    Subscribe { topic: String, position: TopicStart },
+    Unsubscribe { topic: String },
 }
 
 #[derive(Clone)]
