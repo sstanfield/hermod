@@ -45,11 +45,13 @@ impl LogIndex {
 }
 
 #[derive(Deserialize)]
-struct MessageFromLog {
-    pub topic: String,
-    pub payload_size: usize,
-    pub checksum: String,
-    pub sequence: u64,
+enum MessageFromLog {
+    Message {
+        topic: String,
+        payload_size: usize,
+        checksum: String,
+        sequence: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -111,7 +113,7 @@ impl MessageLog {
 
     pub fn append(&mut self, message: &Message) -> io::Result<()> {
         let v = format!(
-            "{{ \"topic\": \"{}\", \"payload_size\": {}, \"checksum\": \"{}\", \"sequence\": {} }}",
+            "{{\"Message\":{{\"topic\":\"{}\",\"payload_size\":{},\"checksum\":\"{}\",\"sequence\":{}}}}}",
             message.topic, message.payload_size, message.checksum, message.sequence
         );
         if self.single_record {
@@ -186,16 +188,25 @@ impl MessageLog {
         if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
             let message: MessageFromLog =
                 serde_json::from_slice(&buf[first_brace..message_offset + 1])?;
-            let len = buf.len();
-            let payload = buf[len - message.payload_size..].to_vec();
-            Ok(Message {
-                message_type: MessageType::Message,
-                topic: message.topic,
-                payload_size: message.payload_size,
-                checksum: message.checksum,
-                sequence: message.sequence,
-                payload,
-            })
+            match message {
+                MessageFromLog::Message {
+                    topic,
+                    payload_size,
+                    checksum,
+                    sequence,
+                } => {
+                    let len = buf.len();
+                    let payload = buf[len - payload_size..].to_vec();
+                    Ok(Message {
+                        message_type: MessageType::Message,
+                        topic: topic,
+                        payload_size: payload_size,
+                        checksum: checksum,
+                        sequence: sequence,
+                        payload,
+                    })
+                }
+            }
         } else {
             Err(io::Error::new(
                 io::ErrorKind::Other,

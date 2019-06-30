@@ -95,7 +95,7 @@ enum StatusType {
 }
 
 #[derive(Deserialize)]
-#[serde(untagged)]
+//#[serde(untagged)]
 enum ClientIncoming {
     Message {
         topic: String,

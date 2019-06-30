@@ -31,12 +31,12 @@ enum TopicStartIn {
     Offset,
 }
 
+// This enum represents the valid incoming messages from a client.
 #[derive(Clone, Deserialize)]
 enum ClientIncoming {
     Connect {
         client_name: String,
         group_id: String,
-        //topics: Vec<String>,
     },
     Subscribe {
         topic: String,
@@ -65,9 +65,11 @@ enum ClientIncoming {
         #[serde(default = "zero_val")]
         count: usize,
     },
-    MessageOut {
-        message: Message,
-    },
+}
+
+enum DecodedData {
+    Incoming { data: ClientIncoming },
+    Message { message: Message },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -88,8 +90,8 @@ impl InMessageCodec {
         }
     }
 
-    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<ClientIncoming>> {
-        let mut result: io::Result<Option<ClientIncoming>> = Ok(None);
+    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<DecodedData>> {
+        let mut result: io::Result<Option<DecodedData>> = Ok(None);
         if self.message.is_none() {
             if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
                 buf.advance(first_brace);
@@ -128,11 +130,13 @@ impl InMessageCodec {
                     ClientIncoming::Batch { batch_type, count } => match batch_type {
                         BatchType::Start => {
                             self.in_batch = true;
-                            result = Ok(Some(ClientIncoming::Batch { batch_type, count }));
+                            result = Ok(Some(DecodedData::Incoming {
+                                data: ClientIncoming::Batch { batch_type, count },
+                            }));
                         }
                         BatchType::End => {
                             self.in_batch = false;
-                            result = Ok(Some(ClientIncoming::MessageOut {
+                            result = Ok(Some(DecodedData::Message {
                                 message: Message {
                                     message_type: MessageType::BatchEnd {
                                         count: self.batch_count,
@@ -150,16 +154,14 @@ impl InMessageCodec {
                             self.in_batch = true;
                             self.batch_count = 0;
                             self.expected_batch_count = count;
-                            result = Ok(Some(ClientIncoming::Batch { batch_type, count }));
+                            result = Ok(Some(DecodedData::Incoming {
+                                data: ClientIncoming::Batch { batch_type, count },
+                            }));
                         }
                     },
-                    ClientIncoming::MessageOut { message: _ } => {
-                        result = Ok(None);
-                        // XXX Should probably kill client, this is not valid input from remote side.
-                    }
                     _ => {
                         // The other variants do not need special treatment.
-                        result = Ok(Some(incoming));
+                        result = Ok(Some(DecodedData::Incoming { data: incoming }));
                     }
                 }
             }
@@ -170,7 +172,7 @@ impl InMessageCodec {
                 message.payload = buf[..message.payload_size].to_vec();
                 buf.advance(message.payload_size);
                 self.message = None;
-                result = Ok(Some(ClientIncoming::MessageOut { message }));
+                result = Ok(Some(DecodedData::Message { message }));
             } else {
                 result = Ok(None);
             }
@@ -255,7 +257,9 @@ pub async fn client_incoming(
                                     leftover_bytes = in_bytes.len();
                                 }
                             }
-                            Ok(Some(ClientIncoming::Status { status })) => {
+                            Ok(Some(DecodedData::Incoming {
+                                data: ClientIncoming::Status { status },
+                            })) => {
                                 send!(
                                     message_incoming_tx,
                                     ClientMessage::IncomingStatus(status),
@@ -264,9 +268,12 @@ pub async fn client_incoming(
                                 );
                                 decoding = true;
                             }
-                            Ok(Some(ClientIncoming::Connect {
-                                client_name,
-                                group_id,
+                            Ok(Some(DecodedData::Incoming {
+                                data:
+                                    ClientIncoming::Connect {
+                                        client_name,
+                                        group_id,
+                                    },
                             })) => {
                                 send_with_status_ok!(
                                     message_incoming_tx,
@@ -276,10 +283,13 @@ pub async fn client_incoming(
                                 );
                                 decoding = true;
                             }
-                            Ok(Some(ClientIncoming::Subscribe {
-                                topic,
-                                position,
-                                offset,
+                            Ok(Some(DecodedData::Incoming {
+                                data:
+                                    ClientIncoming::Subscribe {
+                                        topic,
+                                        position,
+                                        offset,
+                                    },
                             })) => {
                                 let new_pos = match position {
                                     TopicStartIn::Earliest => TopicStart::Earliest,
@@ -289,13 +299,18 @@ pub async fn client_incoming(
                                 };
                                 send_with_status_ok!(
                                     message_incoming_tx,
-                                    ClientMessage::Subscribe { topic, position: new_pos },
+                                    ClientMessage::Subscribe {
+                                        topic,
+                                        position: new_pos
+                                    },
                                     cont,
                                     "Error subscribing client to topic, closing connection!"
                                 );
                                 decoding = true;
                             }
-                            Ok(Some(ClientIncoming::Unsubscribe { topic })) => {
+                            Ok(Some(DecodedData::Incoming {
+                                data: ClientIncoming::Unsubscribe { topic },
+                            })) => {
                                 send_with_status_ok!(
                                     message_incoming_tx,
                                     ClientMessage::Unsubscribe { topic },
@@ -304,10 +319,13 @@ pub async fn client_incoming(
                                 );
                                 decoding = true;
                             }
-                            Ok(Some(ClientIncoming::Commit {
-                                topic,
-                                partition,
-                                commit_offset,
+                            Ok(Some(DecodedData::Incoming {
+                                data:
+                                    ClientIncoming::Commit {
+                                        topic,
+                                        partition,
+                                        commit_offset,
+                                    },
                             })) => {
                                 decoding = true;
                                 send!(
@@ -317,7 +335,7 @@ pub async fn client_incoming(
                                     "Error sending client commit offset, closing connection!"
                                 );
                             }
-                            Ok(Some(ClientIncoming::MessageOut { message })) => {
+                            Ok(Some(DecodedData::Message { message })) => {
                                 decoding = true;
                                 send!(
                                     message_incoming_tx,
@@ -326,23 +344,32 @@ pub async fn client_incoming(
                                     "Error sending publishing message, closing connection!"
                                 );
                             }
-                            Ok(Some(ClientIncoming::Publish {
-                                topic: _,
-                                payload_size: _,
-                                checksum: _,
+                            Ok(Some(DecodedData::Incoming {
+                                data:
+                                    ClientIncoming::Publish {
+                                        topic: _,
+                                        payload_size: _,
+                                        checksum: _,
+                                    },
                             })) => {
                                 error!("Leaked an incoming PublishMessage, fix me!");
                                 cont = false;
                             }
-                            Ok(Some(ClientIncoming::Batch {
-                                batch_type: _,
-                                count: _,
+                            Ok(Some(DecodedData::Incoming {
+                                data:
+                                    ClientIncoming::Batch {
+                                        batch_type: _,
+                                        count: _,
+                                    },
                             })) => {
                                 // This is basically a no-op but need to keep decoding.
                                 decoding = true;
                             }
                             Err(error) => {
-                                error!("Error decoding client message, closing connection: {}", error);
+                                error!(
+                                    "Error decoding client message, closing connection: {}",
+                                    error
+                                );
                                 cont = false;
                                 send_client_error(
                                     message_incoming_tx.clone(),

@@ -127,7 +127,7 @@ impl MessageCore {
                 }
                 ClientMessage::StatusError(code, message) => {
                     let v = format!(
-                        "{{ \"status\": \"ERROR\", \"code\": {}, \"message\": \"{}\" }}",
+                        "{{\"Status\":{{\"status\":\"ERROR\",\"code\":{},\"message\":\"{}\"}}}}",
                         code, message
                     );
                     if let Err(_) = writer.write_all(v.as_bytes()).await {
@@ -136,7 +136,7 @@ impl MessageCore {
                     }
                 }
                 ClientMessage::StatusOk => {
-                    let v = "{ \"status\": \"OK\"}";
+                    let v = "{\"Status\":{\"status\":\"OK\"}}";
                     if let Err(_) = writer.write_all(v.as_bytes()).await {
                         error!("Error writing to client, closing!");
                         self.running = false;
@@ -146,7 +146,7 @@ impl MessageCore {
                     //println!("XXXX internal {}: {}", message.topic, std::str::from_utf8(&message.payload[..]).unwrap());
                 }
                 ClientMessage::Message(message) => {
-                    let v = format!("{{ \"topic\": \"{}\", \"payload_size\": {}, \"checksum\": \"{}\", \"sequence\": {} }}",
+                    let v = format!("{{\"Message\":{{\"topic\":\"{}\",\"payload_size\":{},\"checksum\":\"{}\",\"sequence\":{}}}}}",
                                    message.topic, message.payload_size, message.checksum, message.sequence);
                     if let Err(_) = writer.write_all(v.as_bytes()).await {
                         error!("Error writing to client, closing!");
@@ -191,7 +191,7 @@ impl MessageCore {
                     // XXX should check that the topic/partition are in use by this client.
                     if self.group_id.is_none() {
                         let v = format!(
-                            "{{ \"status\": \"ERROR\", \"code\": {}, \"message\": \"{}\" }}",
+                            "{{\"Status\":{{\"status\":\"ERROR\",\"code\":{},\"message\":\"{}\"}}}}",
                             503, "Client not initialized, closing connection!"
                         );
                         if let Err(_) = writer.write_all(v.as_bytes()).await {
@@ -245,7 +245,7 @@ impl MessageCore {
                     }
                     match message_type {
                         MessageType::Message => {
-                            let v = "{ \"status\": \"OK\"}";
+                            let v = "{\"Status\":{\"status\":\"OK\"}}";
                             if let Err(_) = writer.write_all(v.as_bytes()).await {
                                 error!("Error writing to client, closing!");
                                 self.running = false;
@@ -255,7 +255,8 @@ impl MessageCore {
                             // No feedback during a batch.
                         }
                         MessageType::BatchEnd { count } => {
-                            let v = format!("{{ \"status\": \"OK\", \"count\": {}}}", count);
+                            let v =
+                                format!("{{\"Status\":{{\"status\":\"OK\",\"count\":{}}}}}", count);
                             if let Err(_) = writer.write_all(v.as_bytes()).await {
                                 error!("Error writing to client, closing!");
                                 self.running = false;
