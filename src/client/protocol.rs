@@ -1,0 +1,212 @@
+use std::{io, str};
+
+use bytes::BytesMut;
+
+
+use super::super::common::*;
+use super::super::types::*;
+
+//use log::{error, info};
+
+fn zero_val() -> usize {
+    0
+}
+
+fn zero_val_u64() -> u64 {
+    0
+}
+
+#[derive(Deserialize, Clone, Debug)]
+enum BatchType {
+    Start,
+    End,
+    Count,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+enum TopicStartIn {
+    Earliest,
+    Latest,
+    Current,
+    Offset,
+}
+
+// This enum represents the valid incoming messages from a client.
+#[derive(Clone, Deserialize)]
+enum ClientIncoming {
+    Connect {
+        client_name: String,
+        group_id: String,
+    },
+    Subscribe {
+        topic: String,
+        position: TopicStartIn,
+        #[serde(default = "zero_val")]
+        offset: usize,
+    },
+    Unsubscribe {
+        topic: String,
+    },
+    Status {
+        status: String,
+    },
+    Commit {
+        topic: String,
+        #[serde(default = "zero_val_u64")]
+        partition: u64,
+        commit_offset: u64,
+    },
+    Publish {
+        topic: String,
+        payload_size: usize,
+        checksum: String,
+    },
+    Batch {
+        batch_type: BatchType,
+        #[serde(default = "zero_val")]
+        count: usize,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ClientCodec {
+    message: Option<Message>,
+    in_batch: bool,
+    batch_count: usize,
+    expected_batch_count: usize,
+}
+
+impl ClientCodec {
+    pub fn new() -> ClientCodec {
+        ClientCodec {
+            message: None,
+            in_batch: false,
+            batch_count: 0,
+            expected_batch_count: 0,
+        }
+    }
+
+    pub fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<ClientMessage>> {
+        let mut result: io::Result<Option<ClientMessage>> = Ok(None);
+        if self.message.is_none() {
+            if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
+                buf.advance(first_brace);
+                let line = buf.split_to((message_offset - first_brace) + 1);
+                let incoming: ClientIncoming = serde_json::from_slice(&line[..])?;
+                match incoming {
+                    ClientIncoming::Publish {
+                        topic,
+                        payload_size,
+                        checksum,
+                    } => {
+                        let message_type = if self.in_batch {
+                            self.batch_count += 1;
+                            if self.batch_count == self.expected_batch_count {
+                                self.in_batch = false;
+                                self.batch_count = 0;
+                                let count = self.expected_batch_count;
+                                self.expected_batch_count = 0;
+                                MessageType::BatchEnd { count }
+                            } else {
+                                MessageType::BatchMessage
+                            }
+                        } else {
+                            MessageType::Message
+                        };
+                        let message = Message {
+                            message_type,
+                            topic,
+                            payload_size,
+                            checksum,
+                            sequence: 0,
+                            payload: vec![],
+                        };
+                        self.message = Some(message);
+                    }
+                    ClientIncoming::Batch { batch_type, count } => match batch_type {
+                        BatchType::Start => {
+                            self.in_batch = true;
+                            result = Ok(Some(ClientMessage::Noop));
+                        }
+                        BatchType::End => {
+                            self.in_batch = false;
+                            result = Ok(Some(ClientMessage::PublishMessage {
+                                message: Message {
+                                    message_type: MessageType::BatchEnd {
+                                        count: self.batch_count,
+                                    },
+                                    topic: "".to_string(),
+                                    payload_size: 0,
+                                    checksum: "".to_string(),
+                                    sequence: 0,
+                                    payload: vec![],
+                                },
+                            }));
+                            self.batch_count = 0;
+                        }
+                        BatchType::Count => {
+                            self.in_batch = true;
+                            self.batch_count = 0;
+                            self.expected_batch_count = count;
+                            result = Ok(Some(ClientMessage::Noop));
+                        }
+                    },
+
+                    ClientIncoming::Connect {
+                        client_name,
+                        group_id,
+                    } => {
+                        result = Ok(Some(ClientMessage::Connect(client_name, group_id)));
+                    }
+                    ClientIncoming::Subscribe {
+                        topic,
+                        position,
+                        offset,
+                    } => {
+                        let new_pos = match position {
+                            TopicStartIn::Earliest => TopicStart::Earliest,
+                            TopicStartIn::Latest => TopicStart::Latest,
+                            TopicStartIn::Current => TopicStart::Current,
+                            TopicStartIn::Offset => TopicStart::Offset { offset },
+                        };
+                        result = Ok(Some(ClientMessage::Subscribe {
+                            topic,
+                            position: new_pos,
+                        }));
+                    }
+                    ClientIncoming::Unsubscribe { topic } => {
+                        result = Ok(Some(ClientMessage::Unsubscribe { topic }));
+                    }
+                    ClientIncoming::Status { status } => {
+                        result = Ok(Some(ClientMessage::IncomingStatus(status)));
+                    }
+                    ClientIncoming::Commit {
+                        topic,
+                        partition,
+                        commit_offset,
+                    } => {
+                        result = Ok(Some(ClientMessage::Commit {
+                            topic,
+                            partition,
+                            commit_offset,
+                        }));
+                    }
+                }
+            }
+        }
+        if let Some(message) = &self.message {
+            let mut message = message.clone();
+            if buf.len() >= message.payload_size {
+                message.payload = buf[..message.payload_size].to_vec();
+                buf.advance(message.payload_size);
+                self.message = None;
+                result = Ok(Some(ClientMessage::PublishMessage { message }));
+            } else {
+                result = Ok(None);
+            }
+        }
+
+        result
+    }
+}
+

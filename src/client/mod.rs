@@ -17,6 +17,8 @@ pub mod read_input;
 use crate::read_input::*;
 pub mod message_core;
 use crate::message_core::*;
+pub mod protocol;
+use crate::protocol::*;
 
 pub async fn start_client(
     mut threadpool: ThreadPool,
@@ -56,9 +58,10 @@ async fn new_client(
     info!("Accepting sub stream from: {}", addr);
     let (broker_tx, rx) = mpsc::channel::<ClientMessage>(1000);
     //let (broker_tx, rx) = mpsc::unbounded::<ClientMessage>();
+    let mut codec = ClientCodec::new();
     // Do this so when message_incoming completes client_incoming is dropped and the connection closes.
     let _client = threadpool
-        .spawn_with_handle(client_incoming(broker_tx.clone(), reader))
+        .spawn_with_handle(client_incoming(broker_tx.clone(), reader, codec))
         .unwrap();
     let mut mc = MessageCore::new(broker_tx, rx, idx, broker_manager, io_pool);
     mc.message_incoming(writer).await;

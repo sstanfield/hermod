@@ -1,6 +1,19 @@
 # simple pub/sub protocol.
-Use separate ports for pub and sub, this will reduce negotiation messages.
-publish port is 7878, subscribe port is 8787.
+Use a single port for pub and sub, default is 7878.
+
+## For both:
+### client identification
+Send a json message with client information as first thing.
+```
+{"Connect": {
+    "client_name": "Name of client",
+    "group_id": "group id of client"
+}}
+```
+Client name is primarily for informortation while group_id will be used to save
+committed offsets.  Server will respond with a status:
+`{"Status": { "status": "OK" }}` or
+`{"Status": { "status": "ERROR", "code": code, "message": "SOME MESSAGE" }}`
 
 ## For pub:
 ### single message publication
@@ -9,10 +22,12 @@ of some sort or just expect the server to count brackets to know when
 the header is finished- that is probably most flexible).
 header:
 ```
+{"Publish":
 {
 "topic": "TOPIC",
 "payload_size": bytes,
 "checksum": "sha1 of payload bytes"
+}
 }
 PAYLOAD_BYTES
 ```
@@ -25,7 +40,7 @@ PAYLOAD_BYTES shall be treated as binary data.
 Send the following json header indicating the start of a series of message publications
 along with a count so the server knows how many messages to expect.
 ```
-{"batch_type": "Count", "count": n}
+{"Batch": {"batch_type": "Count", "count": n}}
 ```
 
 The "Count" header should be followed by n messages with the canonical json
@@ -34,7 +49,7 @@ header and payload outlined for single message publication.
 #### stream oriented
 Send the following json header indicating the start of a stream of messages.
 ```
-{"batch_type": "Start"}
+{"Batch": {"batch_type": "Start"}}
 ```
 The "start" header can be followed by any number of messages with the
 canonical json header and payload outlined for single message publication.
@@ -42,39 +57,47 @@ canonical json header and payload outlined for single message publication.
 When finished sendng messages send the following json indicating the end of the
 stream.
 ```
-{"batch_type": "End"}
+{"Batch": {"batch_type": "End"}}
 ```
 (editors note:  json headers are Case Sensitive!)
 
 ## pub acks
 ### single message publication
 sever can respond with either:
-`{ "status": "OK" }` or
-`{ "status": "ERROR", "code": code, "message": "SOME MESSAGE" }`
+`{"Status": { "status": "OK" }}` or
+`{"Status": { "status": "ERROR", "code": code, "message": "SOME MESSAGE" }}`
 
 ### multi message publication
 sever can respond with either:
-`{ "status": "OK", "count": N}` or
-`{ "status": "ERROR", "code": code, "message": "SOME MESSAGE" }`
+`{"Status": { "status": "OK", "count": N}}` or
+`{"Status": { "status": "ERROR", "code": code, "message": "SOME MESSAGE" }}`
 
 Where count is the number of messages the server received.
 
 ## For sub:
-client sends handshake that defines topics it wants:
+Client subscribes to topics it wants with subscribe messages:
 ```
+{"Subscribe":
 {
-"topics": ["TOPIC1", "TOPIC2", "..."]
+"topic": "TOPIC",
+"position": "Earliest | Latest | Current | Offset",
+"offset": offset
+}
 }
 ```
+Only send offset if position is "Offset".  "Current" will use the last committed
+offset.
 Server responds with same response for pub (ok/error).
 
 Then server sends client messages:
 ```
+{"Message":
 {
 "topic": "TOPIC",
 "sequence": SEQUENCE_NUMBER,
 "payload_size": bytes,
 "checksum": "sha1 of payload bytes"
+}
 }
 PAYLOAD_BYTES
 ```
@@ -83,8 +106,31 @@ SEQUENCE_NUMBER shall be incrementing.  Each message received on a topic shall
 increase by one.  (A server may start out at zero, but a late joining client
 shouldn't assume this will start at zero.)
 
+Client can also unsubscribe to a topic with:
+```
+{"Unsubscribe":
+{
+"topic": "TOPIC",
+}
+}
+```
+Server responds with same response for pub (ok/error).
+
+Client can commit the latest offset it has seen so on reconnect it will get
+messages after the commit offset:
+```
+{"Commit":
+{
+    "topic": "topic",
+    "commit_offset": offset to record for this client/topic
+}
+}
+```
+Server responds with same response for pub (ok/error).
+
+
 Client responds with:
-`{ "status": "OK" }` or `{ "status": "CLOSE" }`
+`{ "status": "CLOSE" }` when it wishes to disconnect
 
 
 ## Errors

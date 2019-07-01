@@ -32,6 +32,7 @@ macro_rules! get_broker_tx {
         );
     };
 }
+
 macro_rules! new_client {
     ($self:expr, $partition:expr, $topic:expr, $internal:expr) => {
         let tx: &mut mpsc::Sender<BrokerMessage>;
@@ -48,6 +49,21 @@ macro_rules! new_client {
             error!("Error sending message to broker, close client.");
             $self.running = false;
         }
+    };
+}
+
+macro_rules! send_str {
+    ($self:expr, $writer:expr, $data:expr) => {
+        if let Err(_) = $writer.write_all($data.as_bytes()).await {
+            error!("Error writing to client, closing!");
+            $self.running = false;
+        }
+    };
+}
+
+macro_rules! send_ok {
+    ($self:expr, $writer:expr) => {
+        send_str!($self, $writer, "{\"Status\":{\"status\":\"OK\"}}");
     };
 }
 
@@ -136,11 +152,7 @@ impl MessageCore {
                     }
                 }
                 ClientMessage::StatusOk => {
-                    let v = "{\"Status\":{\"status\":\"OK\"}}";
-                    if let Err(_) = writer.write_all(v.as_bytes()).await {
-                        error!("Error writing to client, closing!");
-                        self.running = false;
-                    }
+                    send_ok!(self, writer);
                 }
                 ClientMessage::InternalMessage(message) => {
                     //println!("XXXX internal {}: {}", message.topic, std::str::from_utf8(&message.payload[..]).unwrap());
@@ -172,6 +184,7 @@ impl MessageCore {
                 ClientMessage::Connect(name, gid) => {
                     self.client_name = name;
                     self.group_id = Some(gid);
+                    send_ok!(self, writer);
                 }
                 ClientMessage::Subscribe { topic, position: _ } => {
                     // XXX Validate connection.
@@ -179,25 +192,32 @@ impl MessageCore {
                         new_client!(self, 0, topic, false);
                         new_client!(self, 0, "__topic_online".to_string(), true);
                     }
+                    send_ok!(self, writer);
                 }
-                ClientMessage::Unsubscribe { topic: _ } => {}
+                ClientMessage::Unsubscribe { topic: _ } => {
+                    send_ok!(self, writer);
+                }
                 ClientMessage::IncomingStatus(status) => {
                     if status.to_lowercase().eq("close") {
                         info!("Client close request.");
                         self.rx.close();
                     }
                 }
-                ClientMessage::Commit(topic, partition, commit_offset) => {
+                ClientMessage::Commit {
+                    topic,
+                    partition,
+                    commit_offset,
+                } => {
                     // XXX should check that the topic/partition are in use by this client.
                     if self.group_id.is_none() {
                         let v = format!(
                             "{{\"Status\":{{\"status\":\"ERROR\",\"code\":{},\"message\":\"{}\"}}}}",
                             503, "Client not initialized, closing connection!"
                         );
-                        if let Err(_) = writer.write_all(v.as_bytes()).await {
-                            error!("Error writing to client, closing!");
-                        }
-                        error!("Error client tried to set topics with no group id, close client.");
+                        send_str!(self, writer, v);
+                        error!(
+                            "Error client tried to set topics with no group id, closing client."
+                        );
                         self.running = false;
                         continue;
                     }
@@ -227,8 +247,9 @@ impl MessageCore {
                         error!("Error sending to broker: {}", error);
                         self.running = false;
                     }
+                    send_ok!(self, writer);
                 }
-                ClientMessage::PublishMessage(message) => {
+                ClientMessage::PublishMessage { message } => {
                     let tp = TopicPartition {
                         partition: 0,
                         topic: message.topic.clone(),
@@ -245,11 +266,7 @@ impl MessageCore {
                     }
                     match message_type {
                         MessageType::Message => {
-                            let v = "{\"Status\":{\"status\":\"OK\"}}";
-                            if let Err(_) = writer.write_all(v.as_bytes()).await {
-                                error!("Error writing to client, closing!");
-                                self.running = false;
-                            }
+                            send_ok!(self, writer);
                         }
                         MessageType::BatchMessage => {
                             // No feedback during a batch.
@@ -257,12 +274,12 @@ impl MessageCore {
                         MessageType::BatchEnd { count } => {
                             let v =
                                 format!("{{\"Status\":{{\"status\":\"OK\",\"count\":{}}}}}", count);
-                            if let Err(_) = writer.write_all(v.as_bytes()).await {
-                                error!("Error writing to client, closing!");
-                                self.running = false;
-                            }
+                            send_str!(self, writer, v);
                         }
                     }
+                }
+                ClientMessage::Noop => {
+                    // Like the name says...
                 }
             };
             message = self.rx.next().await;

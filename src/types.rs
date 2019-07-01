@@ -33,12 +33,24 @@ pub enum ClientMessage {
     InternalMessage(Message),
     MessageBatch(String, u64, u64),
     Over,
-    Connect(String, String), //, Vec<String>),
+    Connect(String, String),
     IncomingStatus(String),
-    Commit(String, u64, u64),
-    PublishMessage(Message),
-    Subscribe { topic: String, position: TopicStart },
-    Unsubscribe { topic: String },
+    Commit {
+        topic: String,
+        partition: u64,
+        commit_offset: u64,
+    },
+    PublishMessage {
+        message: Message,
+    },
+    Subscribe {
+        topic: String,
+        position: TopicStart,
+    },
+    Unsubscribe {
+        topic: String,
+    },
+    Noop,
 }
 
 #[derive(Clone)]
