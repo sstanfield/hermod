@@ -3,6 +3,8 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
+use bytes::{BufMut, BytesMut};
+
 use futures::channel::mpsc;
 use futures::executor::ThreadPool;
 use futures::io::{AsyncWriteExt, WriteHalf};
@@ -53,41 +55,53 @@ macro_rules! new_client {
     };
 }
 
-macro_rules! send_ok {
-    ($self:expr, $writer:expr) => {
-        let data = $self.client_codec.encode(ClientMessage::StatusOk);
-        if let Err(err) = $writer.write_all(&data).await {
-                error!("Error writing to client, closing: {}", err);
-                $self.running = false;
+macro_rules! write_buffer {
+    ($self:expr, $writer:expr, $buf:expr) => {
+        if let Err(err) = $writer.write_all($buf).await {
+            error!("Error writing to client, closing: {}", err);
+            $self.running = false;
         }
-        //send_str!($self, $writer, "{\"Status\":{\"status\":\"OK\"}}");
+        $buf.truncate(0);
     };
-    ($self:expr, $writer:expr, $count:expr) => {
-        let data  = $self.client_codec.encode(ClientMessage::StatusOkCount { count: $count});
-        if let Err(err) = $writer.write_all(&data).await {
-                error!("Error writing to client, closing: {}", err);
-                $self.running = false;
+}
+
+macro_rules! send {
+    ($self:expr, $writer:expr, $message:expr, $buf:expr) => {
+        if let EncodeStatus::BufferToSmall(bytes) = $self.client_codec.encode($buf, $message) {
+            write_buffer!($self, $writer, $buf);
+            $buf.put_slice(&bytes);
         }
+    };
+}
+
+macro_rules! send_ok {
+    ($self:expr, $writer:expr, $buf:expr) => {
+        send!($self, $writer, ClientMessage::StatusOk, $buf);
+    };
+    ($self:expr, $writer:expr, $count:expr, $buf:expr) => {
+        send!(
+            $self,
+            $writer,
+            ClientMessage::StatusOkCount { count: $count },
+            $buf
+        );
     };
 }
 
 macro_rules! send_err {
-    ($self:expr, $writer:expr, $code:expr, $message:expr) => {
-        let data = $self.client_codec.encode(ClientMessage::StatusError($code, $message));
-        if let Err(err) = $writer.write_all(&data).await {
-                error!("Error writing to client, closing: {}", err);
-                $self.running = false;
-        }
+    ($self:expr, $writer:expr, $code:expr, $message:expr, $buf:expr) => {
+        send!(
+            $self,
+            $writer,
+            ClientMessage::StatusError($code, $message),
+            $buf
+        );
     };
 }
 
 macro_rules! send_msg {
-    ($self:expr, $writer:expr, $message:expr) => {
-        let data = $self.client_codec.encode(ClientMessage::Message($message));
-        if let Err(err) = $writer.write_all(&data).await {
-                error!("Error writing to client, closing: {}", err);
-                $self.running = false;
-        }
+    ($self:expr, $writer:expr, $message:expr, $buf:expr) => {
+        send!($self, $writer, ClientMessage::Message($message), $buf);
     };
 }
 
@@ -161,25 +175,29 @@ impl MessageCore {
     }
 
     pub async fn message_incoming(&mut self, mut writer: WriteHalf<TcpStream>) {
+        let buf_size = 48000;
+        let mut out_bytes = BytesMut::with_capacity(buf_size);
+        let out_bytes = &mut out_bytes;
         let mut message = self.rx.next().await;
         while self.running && message.is_some() {
             let mes = message.unwrap();
             message = None;
             match mes {
                 ClientMessage::Over => {
-                    self.rx.close();
+                    self.running = false;
+                    continue;
                 }
                 ClientMessage::StatusError(code, message) => {
-                    send_err!(self, writer, code, message);
+                    send_err!(self, writer, code, message, out_bytes);
                 }
                 ClientMessage::StatusOk => {
-                    send_ok!(self, writer);
+                    send_ok!(self, writer, out_bytes);
                 }
                 ClientMessage::InternalMessage(message) => {
                     //println!("XXXX internal {}: {}", message.topic, std::str::from_utf8(&message.payload[..]).unwrap());
                 }
                 ClientMessage::Message(message) => {
-                    send_msg!(self, writer, message);
+                    send_msg!(self, writer, message, out_bytes);
                 }
                 ClientMessage::MessageBatch(file_name, start, length) => {
                     writer = self
@@ -196,7 +214,7 @@ impl MessageCore {
                 ClientMessage::Connect(name, gid) => {
                     self.client_name = name;
                     self.group_id = Some(gid);
-                    send_ok!(self, writer);
+                    send_ok!(self, writer, out_bytes);
                 }
                 ClientMessage::Subscribe { topic, position: _ } => {
                     // XXX Validate connection.
@@ -204,15 +222,16 @@ impl MessageCore {
                         new_client!(self, 0, topic, false);
                         new_client!(self, 0, "__topic_online".to_string(), true);
                     }
-                    send_ok!(self, writer);
+                    send_ok!(self, writer, out_bytes);
                 }
                 ClientMessage::Unsubscribe { topic: _ } => {
-                    send_ok!(self, writer);
+                    send_ok!(self, writer, out_bytes);
                 }
                 ClientMessage::IncomingStatus(status) => {
                     if status.to_lowercase().eq("close") {
                         info!("Client close request.");
-                        self.rx.close();
+                        self.running = false;
+                        continue;
                     }
                 }
                 ClientMessage::Commit {
@@ -226,7 +245,8 @@ impl MessageCore {
                             self,
                             writer,
                             503,
-                            "Client not initialized, closing connection!".to_string()
+                            "Client not initialized, closing connection!".to_string(),
+                            out_bytes
                         );
                         error!(
                             "Error client tried to set topics with no group id, closing client."
@@ -260,7 +280,7 @@ impl MessageCore {
                         error!("Error sending to broker: {}", error);
                         self.running = false;
                     }
-                    send_ok!(self, writer);
+                    send_ok!(self, writer, out_bytes);
                 }
                 ClientMessage::PublishMessage { message } => {
                     let tp = TopicPartition {
@@ -279,25 +299,34 @@ impl MessageCore {
                     }
                     match message_type {
                         MessageType::Message => {
-                            send_ok!(self, writer);
+                            send_ok!(self, writer, out_bytes);
                         }
                         MessageType::BatchMessage => {
                             // No feedback during a batch.
                         }
                         MessageType::BatchEnd { count } => {
-                            send_ok!(self, writer, count);
+                            send_ok!(self, writer, count, out_bytes);
                         }
                     }
                 }
                 ClientMessage::Noop => {
                     // Like the name says...
                 }
-                ClientMessage::StatusOkCount{ count: _ } => {
+                ClientMessage::StatusOkCount { count: _ } => {
                     // Ignore (or maybe abort client), should not happen...
                 }
             };
-            message = self.rx.next().await;
+            if let Ok(m) = self.rx.try_next() {
+                // Next message is already here, go ahead and get it on the output
+                // buffer.
+                message = m;
+            } else {
+                // Need to wait so go ahead and send data to client.
+                write_buffer!(self, writer, out_bytes);
+                message = self.rx.next().await;
+            }
         }
+        self.rx.close();
         info!("Exiting messaging_incoming.");
     }
 }

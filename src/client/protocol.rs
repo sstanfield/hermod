@@ -1,6 +1,6 @@
 use std::{io, str};
 
-use bytes::BytesMut;
+use bytes::{Bytes, BufMut, BytesMut};
 
 use super::super::common::*;
 use super::super::types::*;
@@ -63,6 +63,15 @@ enum ClientIncoming {
         #[serde(default = "zero_val")]
         count: usize,
     },
+}
+
+fn move_bytes(buf: &mut BytesMut, bytes: &[u8]) -> EncodeStatus {
+    if bytes.len() > buf.remaining_mut() {
+        EncodeStatus::BufferToSmall(Bytes::from(bytes))
+    } else {
+        buf.put_slice(bytes);
+        EncodeStatus::Ok
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -206,24 +215,17 @@ impl ClientCodec {
         result
     }
 
-    pub fn encode(
-        &self,
-        message: ClientMessage,
-    ) -> Vec<u8> {
+    pub fn encode(&self, buf: &mut BytesMut, message: ClientMessage) -> EncodeStatus {
         match message {
             ClientMessage::StatusOk => {
                 let v = "{\"Status\":{\"status\":\"OK\"}}";
                 let bytes = v.as_bytes();
-                let mut vec = Vec::with_capacity(bytes.len());
-                vec.extend_from_slice(bytes);
-                vec
+                move_bytes(buf, bytes)
             }
             ClientMessage::StatusOkCount { count } => {
                 let v = format!("{{\"Status\":{{\"status\":\"OK\",\"count\":{}}}}}", count);
                 let bytes = v.as_bytes();
-                let mut vec = Vec::with_capacity(bytes.len());
-                vec.extend_from_slice(bytes);
-                vec
+                move_bytes(buf, bytes)
             }
             ClientMessage::StatusError(code, message) => {
                 let v = format!(
@@ -231,22 +233,24 @@ impl ClientCodec {
                     code, message
                 );
                 let bytes = v.as_bytes();
-                let mut vec = Vec::with_capacity(bytes.len());
-                vec.extend_from_slice(bytes);
-                vec
+                move_bytes(buf, bytes)
             }
             ClientMessage::Message(message) => {
                 let v = format!("{{\"Message\":{{\"topic\":\"{}\",\"payload_size\":{},\"checksum\":\"{}\",\"sequence\":{}}}}}",
                                    message.topic, message.payload_size, message.checksum, message.sequence);
                 let bytes = v.as_bytes();
-                let mut vec = Vec::with_capacity(bytes.len()+message.payload_size);
-                vec.extend_from_slice(bytes);
-                vec.extend_from_slice(&message.payload);
-                vec
+                if (bytes.len() + message.payload_size) > buf.remaining_mut() {
+                    let mut new_bytes = BytesMut::with_capacity(bytes.len() + message.payload_size);
+                    new_bytes.put_slice(bytes);
+                    new_bytes.put_slice(&message.payload);
+                    EncodeStatus::BufferToSmall(new_bytes.freeze())
+                } else {
+                    buf.put_slice(bytes);
+                    buf.put_slice(&message.payload);
+                    EncodeStatus::Ok
+                }
             }
-            _ => {
-                vec![0; 1]
-            }
+            _ => EncodeStatus::Invalid,
         }
     }
 }

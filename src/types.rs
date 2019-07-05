@@ -1,4 +1,5 @@
 use futures::channel::mpsc;
+use bytes::Bytes;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum MessageType {
@@ -67,4 +68,11 @@ pub enum BrokerMessage {
 pub struct TopicPartition {
     pub partition: u64,
     pub topic: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum EncodeStatus {
+    Ok,
+    BufferToSmall(Bytes),
+    Invalid,
 }
