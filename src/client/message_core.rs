@@ -14,6 +14,7 @@ use romio::TcpStream;
 
 use super::super::broker::*;
 use super::super::types::*;
+use super::protocol::*;
 
 use log::{error, info};
 
@@ -52,18 +53,41 @@ macro_rules! new_client {
     };
 }
 
-macro_rules! send_str {
-    ($self:expr, $writer:expr, $data:expr) => {
-        if let Err(_) = $writer.write_all($data.as_bytes()).await {
-            error!("Error writing to client, closing!");
-            $self.running = false;
+macro_rules! send_ok {
+    ($self:expr, $writer:expr) => {
+        let data = $self.client_codec.encode(ClientMessage::StatusOk);
+        if let Err(err) = $writer.write_all(&data).await {
+                error!("Error writing to client, closing: {}", err);
+                $self.running = false;
+        }
+        //send_str!($self, $writer, "{\"Status\":{\"status\":\"OK\"}}");
+    };
+    ($self:expr, $writer:expr, $count:expr) => {
+        let data  = $self.client_codec.encode(ClientMessage::StatusOkCount { count: $count});
+        if let Err(err) = $writer.write_all(&data).await {
+                error!("Error writing to client, closing: {}", err);
+                $self.running = false;
         }
     };
 }
 
-macro_rules! send_ok {
-    ($self:expr, $writer:expr) => {
-        send_str!($self, $writer, "{\"Status\":{\"status\":\"OK\"}}");
+macro_rules! send_err {
+    ($self:expr, $writer:expr, $code:expr, $message:expr) => {
+        let data = $self.client_codec.encode(ClientMessage::StatusError($code, $message));
+        if let Err(err) = $writer.write_all(&data).await {
+                error!("Error writing to client, closing: {}", err);
+                $self.running = false;
+        }
+    };
+}
+
+macro_rules! send_msg {
+    ($self:expr, $writer:expr, $message:expr) => {
+        let data = $self.client_codec.encode(ClientMessage::Message($message));
+        if let Err(err) = $writer.write_all(&data).await {
+                error!("Error writing to client, closing: {}", err);
+                $self.running = false;
+        }
     };
 }
 
@@ -76,6 +100,7 @@ pub struct MessageCore {
     client_name: String,
     group_id: Option<String>,
     running: bool,
+    client_codec: ClientCodec,
 }
 
 impl MessageCore {
@@ -85,6 +110,7 @@ impl MessageCore {
         idx: u64,
         broker_manager: Arc<BrokerManager>,
         io_pool: ThreadPool,
+        client_codec: ClientCodec,
     ) -> MessageCore {
         let broker_tx_cache: HashMap<TopicPartition, mpsc::Sender<BrokerMessage>> = HashMap::new();
         let client_name = format!("Client_{}", idx);
@@ -98,6 +124,7 @@ impl MessageCore {
             client_name,
             group_id,
             running: true,
+            client_codec,
         }
     }
 
@@ -136,20 +163,14 @@ impl MessageCore {
     pub async fn message_incoming(&mut self, mut writer: WriteHalf<TcpStream>) {
         let mut message = self.rx.next().await;
         while self.running && message.is_some() {
-            let mes = message.clone().unwrap();
+            let mes = message.unwrap();
+            message = None;
             match mes {
                 ClientMessage::Over => {
                     self.rx.close();
                 }
                 ClientMessage::StatusError(code, message) => {
-                    let v = format!(
-                        "{{\"Status\":{{\"status\":\"ERROR\",\"code\":{},\"message\":\"{}\"}}}}",
-                        code, message
-                    );
-                    if let Err(_) = writer.write_all(v.as_bytes()).await {
-                        error!("Error writing to client, closing!");
-                        self.running = false;
-                    }
+                    send_err!(self, writer, code, message);
                 }
                 ClientMessage::StatusOk => {
                     send_ok!(self, writer);
@@ -158,16 +179,7 @@ impl MessageCore {
                     //println!("XXXX internal {}: {}", message.topic, std::str::from_utf8(&message.payload[..]).unwrap());
                 }
                 ClientMessage::Message(message) => {
-                    let v = format!("{{\"Message\":{{\"topic\":\"{}\",\"payload_size\":{},\"checksum\":\"{}\",\"sequence\":{}}}}}",
-                                   message.topic, message.payload_size, message.checksum, message.sequence);
-                    if let Err(_) = writer.write_all(v.as_bytes()).await {
-                        error!("Error writing to client, closing!");
-                        self.running = false;
-                    }
-                    if let Err(_) = writer.write_all(&message.payload[..]).await {
-                        error!("Error writing to client, closing!");
-                        self.running = false;
-                    }
+                    send_msg!(self, writer, message);
                 }
                 ClientMessage::MessageBatch(file_name, start, length) => {
                     writer = self
@@ -210,11 +222,12 @@ impl MessageCore {
                 } => {
                     // XXX should check that the topic/partition are in use by this client.
                     if self.group_id.is_none() {
-                        let v = format!(
-                            "{{\"Status\":{{\"status\":\"ERROR\",\"code\":{},\"message\":\"{}\"}}}}",
-                            503, "Client not initialized, closing connection!"
+                        send_err!(
+                            self,
+                            writer,
+                            503,
+                            "Client not initialized, closing connection!".to_string()
                         );
-                        send_str!(self, writer, v);
                         error!(
                             "Error client tried to set topics with no group id, closing client."
                         );
@@ -272,14 +285,15 @@ impl MessageCore {
                             // No feedback during a batch.
                         }
                         MessageType::BatchEnd { count } => {
-                            let v =
-                                format!("{{\"Status\":{{\"status\":\"OK\",\"count\":{}}}}}", count);
-                            send_str!(self, writer, v);
+                            send_ok!(self, writer, count);
                         }
                     }
                 }
                 ClientMessage::Noop => {
                     // Like the name says...
+                }
+                ClientMessage::StatusOkCount{ count: _ } => {
+                    // Ignore (or maybe abort client), should not happen...
                 }
             };
             message = self.rx.next().await;

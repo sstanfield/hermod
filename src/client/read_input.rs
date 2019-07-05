@@ -1,4 +1,4 @@
-use std::{str};
+use std::str;
 
 use bytes::BytesMut;
 use futures::channel::mpsc;

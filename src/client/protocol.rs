@@ -2,11 +2,8 @@ use std::{io, str};
 
 use bytes::BytesMut;
 
-
 use super::super::common::*;
 use super::super::types::*;
-
-//use log::{error, info};
 
 fn zero_val() -> usize {
     0
@@ -208,5 +205,48 @@ impl ClientCodec {
 
         result
     }
-}
 
+    pub fn encode(
+        &self,
+        message: ClientMessage,
+    ) -> Vec<u8> {
+        match message {
+            ClientMessage::StatusOk => {
+                let v = "{\"Status\":{\"status\":\"OK\"}}";
+                let bytes = v.as_bytes();
+                let mut vec = Vec::with_capacity(bytes.len());
+                vec.extend_from_slice(bytes);
+                vec
+            }
+            ClientMessage::StatusOkCount { count } => {
+                let v = format!("{{\"Status\":{{\"status\":\"OK\",\"count\":{}}}}}", count);
+                let bytes = v.as_bytes();
+                let mut vec = Vec::with_capacity(bytes.len());
+                vec.extend_from_slice(bytes);
+                vec
+            }
+            ClientMessage::StatusError(code, message) => {
+                let v = format!(
+                    "{{\"Status\":{{\"status\":\"ERROR\",\"code\":{},\"message\":\"{}\"}}}}",
+                    code, message
+                );
+                let bytes = v.as_bytes();
+                let mut vec = Vec::with_capacity(bytes.len());
+                vec.extend_from_slice(bytes);
+                vec
+            }
+            ClientMessage::Message(message) => {
+                let v = format!("{{\"Message\":{{\"topic\":\"{}\",\"payload_size\":{},\"checksum\":\"{}\",\"sequence\":{}}}}}",
+                                   message.topic, message.payload_size, message.checksum, message.sequence);
+                let bytes = v.as_bytes();
+                let mut vec = Vec::with_capacity(bytes.len()+message.payload_size);
+                vec.extend_from_slice(bytes);
+                vec.extend_from_slice(&message.payload);
+                vec
+            }
+            _ => {
+                vec![0; 1]
+            }
+        }
+    }
+}

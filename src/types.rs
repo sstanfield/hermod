@@ -28,6 +28,9 @@ pub enum TopicStart {
 #[derive(Clone)]
 pub enum ClientMessage {
     StatusOk,
+    StatusOkCount {
+        count: usize,
+    },
     StatusError(u32, String),
     Message(Message),
     InternalMessage(Message),

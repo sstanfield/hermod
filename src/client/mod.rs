@@ -22,7 +22,7 @@ use crate::protocol::*;
 
 pub async fn start_client(
     mut threadpool: ThreadPool,
-    mut io_pool: ThreadPool,
+    io_pool: ThreadPool,
     broker_manager: Arc<BrokerManager>,
 ) {
     let mut listener = TcpListener::bind(&"127.0.0.1:7878".parse().unwrap())
@@ -51,19 +51,19 @@ async fn new_client(
     idx: u64,
     broker_manager: Arc<BrokerManager>,
     mut threadpool: ThreadPool,
-    mut io_pool: ThreadPool,
+    io_pool: ThreadPool,
 ) {
     let addr = stream.peer_addr().unwrap();
     let (reader, writer) = stream.split();
     info!("Accepting sub stream from: {}", addr);
     let (broker_tx, rx) = mpsc::channel::<ClientMessage>(1000);
     //let (broker_tx, rx) = mpsc::unbounded::<ClientMessage>();
-    let mut codec = ClientCodec::new();
+    let codec = ClientCodec::new();
     // Do this so when message_incoming completes client_incoming is dropped and the connection closes.
     let _client = threadpool
-        .spawn_with_handle(client_incoming(broker_tx.clone(), reader, codec))
+        .spawn_with_handle(client_incoming(broker_tx.clone(), reader, codec.clone()))
         .unwrap();
-    let mut mc = MessageCore::new(broker_tx, rx, idx, broker_manager, io_pool);
+    let mut mc = MessageCore::new(broker_tx, rx, idx, broker_manager, io_pool, codec);
     mc.message_incoming(writer).await;
 
     info!("Closing sub stream from: {}", addr);
