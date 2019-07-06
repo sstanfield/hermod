@@ -2,8 +2,8 @@ use std::{io, str};
 
 use bytes::{BufMut, Bytes, BytesMut};
 
-use super::super::common::*;
-use super::super::types::*;
+use super::util::*;
+use super::types::*;
 
 fn zero_val() -> usize {
     0

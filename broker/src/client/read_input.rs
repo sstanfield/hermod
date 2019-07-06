@@ -7,8 +7,8 @@ use futures::sink::SinkExt;
 
 use romio::TcpStream;
 
-use super::super::types::*;
-use super::protocol::*;
+use common::types::*;
+use common::protocolx::*;
 
 use log::{error, info};
 

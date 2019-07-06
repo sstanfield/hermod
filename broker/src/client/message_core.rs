@@ -15,8 +15,8 @@ use futures::StreamExt;
 use romio::TcpStream;
 
 use super::super::broker::*;
-use super::super::types::*;
-use super::protocol::*;
+use common::types::*;
+use common::protocolx::*;
 
 use log::{error, info, debug};
 
@@ -180,7 +180,6 @@ impl MessageCore {
                 }
             }
         }
-        writer.flush();
         writer
     }
 

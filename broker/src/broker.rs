@@ -8,7 +8,7 @@ use futures::task::SpawnExt;
 use futures::StreamExt;
 
 use super::msglog::*;
-use super::types::*;
+use common::types::*;
 
 use log::{error, info};
 
@@ -20,6 +20,13 @@ struct OffsetRecord {
     partition: u64,
     topic: String,
     offset: u64,
+}
+
+#[derive(Clone)]
+pub enum BrokerMessage {
+    Message(Message),
+    NewClient(String, String, mpsc::Sender<ClientMessage>, bool),
+    CloseClient(String),
 }
 
 pub struct BrokerManager {

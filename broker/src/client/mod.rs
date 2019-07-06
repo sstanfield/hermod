@@ -9,7 +9,7 @@ use futures::StreamExt;
 use romio::{TcpListener, TcpStream};
 
 use super::broker::*;
-use super::types::*;
+use common::types::*;
 
 use log::info;
 
@@ -17,8 +17,8 @@ pub mod read_input;
 use crate::read_input::*;
 pub mod message_core;
 use crate::message_core::*;
-pub mod protocol;
-use crate::protocol::*;
+
+use common::protocolx::*;
 
 pub async fn start_client(
     mut threadpool: ThreadPool,

@@ -1,5 +1,4 @@
 use bytes::Bytes;
-use futures::channel::mpsc;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum MessageType {
@@ -60,13 +59,6 @@ pub enum ClientMessage {
         topic: String,
     },
     Noop,
-}
-
-#[derive(Clone)]
-pub enum BrokerMessage {
-    Message(Message),
-    NewClient(String, String, mpsc::Sender<ClientMessage>, bool),
-    CloseClient(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
