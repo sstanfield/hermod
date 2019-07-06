@@ -5,12 +5,12 @@ use std::io;
 use futures::executor::ThreadPoolBuilder;
 //use futures::future::join;
 
+use log::{Level, LevelFilter, Metadata, Record};
 use std::clone::Clone;
 use std::sync::Arc;
 
+use common::protocolx::*;
 use hermod::*;
-
-use log::{Level, LevelFilter, Metadata, Record};
 
 struct SimpleLogger;
 
@@ -51,6 +51,12 @@ fn main() -> io::Result<()> {
         start_pub_empty(threadpool.clone(), broker_manager.clone()),
         start_sub_empty(threadpool.clone(), io_pool.clone(), broker_manager.clone()),
     ));*/
-    threadpool.run(start_client(threadpool.clone(), io_pool, broker_manager));
+    threadpool.run(start_client(
+        threadpool.clone(),
+        io_pool,
+        broker_manager,
+        decoder_factory,
+        encoder_factory,
+    ));
     Ok(())
 }

@@ -11,8 +11,8 @@ use log::error;
 
 use serde_json;
 
-use common::util::*;
 use common::types::*;
+use common::util::*;
 
 pub struct LogIndex {
     pub offset: u64,

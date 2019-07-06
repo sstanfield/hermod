@@ -8,7 +8,6 @@ use futures::sink::SinkExt;
 use romio::TcpStream;
 
 use common::types::*;
-use common::protocolx::*;
 
 use log::{error, info};
 
@@ -34,25 +33,12 @@ macro_rules! send {
     };
 }
 
-/*macro_rules! send_with_status_ok {
-    ($tx:expr, $message:expr, $cont:expr, $error_msg:expr) => {
-        if let Err(_) = $tx.send($message).await {
-            error!($error_msg);
-            $cont = false;
-        } else {
-            if let Err(_) = $tx.send(ClientMessage::StatusOk).await {
-                error!("Error sending client status ok, closing connection!");
-                $cont = false;
-            }
-        }
-    };
-}*/
-
 pub async fn client_incoming(
     mut message_incoming_tx: mpsc::Sender<ClientMessage>,
     mut reader: ReadHalf<TcpStream>,
-    mut decoder: ClientCodec,
+    decoder_factor: ProtocolDecoderFactory,
 ) {
+    let mut decoder = decoder_factor();
     let buf_size = 32000;
     let mut in_bytes = BytesMut::with_capacity(buf_size);
     in_bytes.resize(buf_size, 0);

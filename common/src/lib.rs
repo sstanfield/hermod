@@ -12,7 +12,6 @@ pub use crate::util::*;
 pub mod protocolx;
 pub use crate::protocolx::*;
 
-
 #[cfg(test)]
 mod tests {
     #[test]

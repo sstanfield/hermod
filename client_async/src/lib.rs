@@ -8,12 +8,12 @@ use futures::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 #[macro_use]
 extern crate serde_derive;
 
-use serde_json;
+use log::error;
 use romio::TcpStream;
-use log::{error};
+use serde_json;
 
-use common::util::*;
 use common::types::*;
+use common::util::*;
 
 fn zero_val() -> usize {
     0
@@ -53,9 +53,14 @@ enum ClientIncoming {
 }
 
 enum DecodedMessage {
-    Message{ message: Message },
+    Message {
+        message: Message,
+    },
     StatusOk,
-    StatusError{ code: usize, message: String },
+    StatusError {
+        code: usize,
+        message: String,
+    },
     CommitAck {
         topic: String,
         partition: u64,
@@ -106,7 +111,9 @@ impl InMessageCodec {
                     } => {
                         result = match status {
                             StatusType::OK => Ok(Some(DecodedMessage::StatusOk)),
-                            StatusType::Error => Ok(Some(DecodedMessage::StatusError { code, message })),
+                            StatusType::Error => {
+                                Ok(Some(DecodedMessage::StatusError { code, message }))
+                            }
                         }
                     }
                     ClientIncoming::CommitAck {
@@ -114,7 +121,11 @@ impl InMessageCodec {
                         partition,
                         offset,
                     } => {
-                        result = Ok(Some(DecodedMessage::CommitAck { topic, partition, offset }))
+                        result = Ok(Some(DecodedMessage::CommitAck {
+                            topic,
+                            partition,
+                            offset,
+                        }))
                     }
                 }
             }
@@ -126,7 +137,7 @@ impl InMessageCodec {
                 message.payload = buf[..message.payload_size].to_vec();
                 buf.advance(message.payload_size);
                 got_payload = true;
-                result = Ok(Some(DecodedMessage::Message{ message }));
+                result = Ok(Some(DecodedMessage::Message { message }));
             } else {
                 result = Ok(None);
             }
@@ -157,13 +168,13 @@ impl Client {
         let (reader, mut writer) = stream.split();
         writer
             .write_all(
-//                b"{\"client_name\": \"client1\", \"group_id\": \"g1\", \"topics\": [\"top1\"]}",
+                //                b"{\"client_name\": \"client1\", \"group_id\": \"g1\", \"topics\": [\"top1\"]}",
                 b"{\"Connect\": {\"client_name\": \"client1\", \"group_id\": \"g1\"}}",
             )
             .await?;
         writer
             .write_all(
-//                b"{\"client_name\": \"client1\", \"group_id\": \"g1\", \"topics\": [\"top1\"]}",
+                //                b"{\"client_name\": \"client1\", \"group_id\": \"g1\", \"topics\": [\"top1\"]}",
                 b"{\"Subscribe\": {\"topic\": \"top1\", \"position\": \"Current\"}}",
             )
             .await?;
@@ -192,8 +203,16 @@ impl Client {
         Ok(())
     }*/
 
-    pub async fn commit_offset(&mut self, topic: String, partition: u64, offset: u64) -> io::Result<()> {
-        let message = format!("{{\"Commit\": {{\"topic\": \"{}\", \"partition\": {}, \"commit_offset\": {}}}}}", topic, partition, offset);
+    pub async fn commit_offset(
+        &mut self,
+        topic: String,
+        partition: u64,
+        offset: u64,
+    ) -> io::Result<()> {
+        let message = format!(
+            "{{\"Commit\": {{\"topic\": \"{}\", \"partition\": {}, \"commit_offset\": {}}}}}",
+            topic, partition, offset
+        );
         println!("XXX committing: {}", message);
         self.writer.write_all(message.as_bytes()).await?;
         Ok(())
@@ -204,20 +223,18 @@ impl Client {
             let input = if self.decoding {
                 Ok(self.in_bytes.len())
             } else {
-                        // Reclaim the entire buffer and copy leftover bytes to front.
-                        self.in_bytes.reserve(self.buf_size - self.in_bytes.len());
-                        unsafe {
-                            self.in_bytes.set_len(self.buf_size);
-                        }
-                self
-                .reader
-                .read(&mut self.in_bytes[self.leftover_bytes..])
-                .await
+                // Reclaim the entire buffer and copy leftover bytes to front.
+                self.in_bytes.reserve(self.buf_size - self.in_bytes.len());
+                unsafe {
+                    self.in_bytes.set_len(self.buf_size);
+                }
+                self.reader
+                    .read(&mut self.in_bytes[self.leftover_bytes..])
+                    .await
             };
-            match input
-            {
+            match input {
                 Ok(bytes) => {
-                //println!("XXXX c1: {}", bytes);
+                    //println!("XXXX c1: {}", bytes);
                     if bytes == 0 && !self.decoding {
                         error!("Remote publisher done.");
                         return Err(io::Error::new(
@@ -229,7 +246,7 @@ impl Client {
                         self.in_bytes.truncate(self.leftover_bytes + bytes);
                         self.leftover_bytes = 0;
                         match self.codec.decode(&mut self.in_bytes) {
-                            Ok(Some(DecodedMessage::Message{ message })) => {
+                            Ok(Some(DecodedMessage::Message { message })) => {
                                 self.decoding = true;
                                 return Ok(message);
                             }
@@ -237,12 +254,19 @@ impl Client {
                                 println!("XXXX got OK status");
                                 self.decoding = true;
                             }
-                            Ok(Some(DecodedMessage::StatusError{ code, message })) => {
+                            Ok(Some(DecodedMessage::StatusError { code, message })) => {
                                 println!("XXXX got ERROR, code: {}, message: {}", code, message);
                                 self.decoding = true;
                             }
-                            Ok(Some(DecodedMessage::CommitAck{ topic, partition, offset })) => {
-                                println!("XXXX got CommitAck, topic: {}, partition: {}, offset: {}", topic, partition, offset);
+                            Ok(Some(DecodedMessage::CommitAck {
+                                topic,
+                                partition,
+                                offset,
+                            })) => {
+                                println!(
+                                    "XXXX got CommitAck, topic: {}, partition: {}, offset: {}",
+                                    topic, partition, offset
+                                );
                                 self.decoding = true;
                             }
                             Ok(None) => {

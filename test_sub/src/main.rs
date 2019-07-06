@@ -1,9 +1,9 @@
 #![feature(async_await)]
 
-use std::io;
+use client_async::*;
 use futures::executor;
 use log::{error, Level, LevelFilter, Metadata, Record};
-use client_async::*;
+use std::io;
 
 struct SimpleLogger;
 
@@ -44,7 +44,10 @@ fn main() -> io::Result<()> {
                         String::from_utf8(message.payload).unwrap()
                     );
                     if message.sequence % 100 == 0 {
-                        client.commit_offset("top1".to_string(), 0, message.sequence).await.unwrap();
+                        client
+                            .commit_offset("top1".to_string(), 0, message.sequence)
+                            .await
+                            .unwrap();
                     }
                 }
                 Err(error) => {

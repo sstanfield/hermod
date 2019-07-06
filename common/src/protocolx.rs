@@ -2,8 +2,8 @@ use std::{io, str};
 
 use bytes::{BufMut, Bytes, BytesMut};
 
-use super::util::*;
 use super::types::*;
+use super::util::*;
 
 fn zero_val() -> usize {
     0
@@ -75,24 +75,26 @@ fn move_bytes(buf: &mut BytesMut, bytes: &[u8]) -> EncodeStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct ClientCodec {
+pub struct ClientDecoder {
     message: Option<Message>,
     in_batch: bool,
     batch_count: usize,
     expected_batch_count: usize,
 }
 
-impl ClientCodec {
-    pub fn new() -> ClientCodec {
-        ClientCodec {
+impl ClientDecoder {
+    pub fn new() -> ClientDecoder {
+        ClientDecoder {
             message: None,
             in_batch: false,
             batch_count: 0,
             expected_batch_count: 0,
         }
     }
+}
 
-    pub fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<ClientMessage>> {
+impl ProtocolDecoder for ClientDecoder {
+    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<ClientMessage>> {
         let mut result: io::Result<Option<ClientMessage>> = Ok(None);
         if self.message.is_none() {
             if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
@@ -214,8 +216,13 @@ impl ClientCodec {
 
         result
     }
+}
 
-    pub fn encode(&self, buf: &mut BytesMut, message: ClientMessage) -> EncodeStatus {
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ClientEncoder;
+
+impl ProtocolEncoder for ClientEncoder {
+    fn encode(&mut self, buf: &mut BytesMut, message: ClientMessage) -> EncodeStatus {
         match message {
             ClientMessage::StatusOk => {
                 let v = "{\"Status\":{\"status\":\"OK\"}}";
@@ -235,7 +242,11 @@ impl ClientCodec {
                 let bytes = v.as_bytes();
                 move_bytes(buf, bytes)
             }
-            ClientMessage::CommitAck{topic, partition, offset} => {
+            ClientMessage::CommitAck {
+                topic,
+                partition,
+                offset,
+            } => {
                 let v = format!(
                     "{{\"CommitAck\":{{\"topic\":\"{}\",\"partition\":{},\"offset\":{}}}}}",
                     topic, partition, offset
@@ -261,4 +272,12 @@ impl ClientCodec {
             _ => EncodeStatus::Invalid,
         }
     }
+}
+
+pub fn decoder_factory() -> Box<dyn ProtocolDecoder> {
+    Box::new(ClientDecoder::new())
+}
+
+pub fn encoder_factory() -> Box<dyn ProtocolEncoder> {
+    Box::new(ClientEncoder {})
 }

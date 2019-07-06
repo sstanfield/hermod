@@ -1,4 +1,5 @@
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
+use std::io;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum MessageType {
@@ -73,3 +74,14 @@ pub enum EncodeStatus {
     BufferToSmall(Bytes),
     Invalid,
 }
+
+pub trait ProtocolDecoder: Send {
+    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<ClientMessage>>;
+}
+
+pub trait ProtocolEncoder: Send {
+    fn encode(&mut self, buf: &mut BytesMut, message: ClientMessage) -> EncodeStatus;
+}
+
+pub type ProtocolDecoderFactory = fn() -> Box<dyn ProtocolDecoder>;
+pub type ProtocolEncoderFactory = fn() -> Box<dyn ProtocolEncoder>;

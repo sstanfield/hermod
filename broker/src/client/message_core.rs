@@ -16,9 +16,8 @@ use romio::TcpStream;
 
 use super::super::broker::*;
 use common::types::*;
-use common::protocolx::*;
 
-use log::{error, info, debug};
+use log::{debug, error, info};
 
 macro_rules! get_broker_tx {
     ($self:expr, $partition:expr, $topic:expr, $tx:expr) => {
@@ -69,7 +68,7 @@ macro_rules! write_buffer {
 
 macro_rules! send {
     ($self:expr, $writer:expr, $message:expr, $buf:expr) => {
-        if let EncodeStatus::BufferToSmall(bytes) = $self.client_codec.encode($buf, $message) {
+        if let EncodeStatus::BufferToSmall(bytes) = $self.client_encoder.encode($buf, $message) {
             write_buffer!($self, $writer, $buf);
             $buf.put_slice(&bytes);
         }
@@ -92,7 +91,16 @@ macro_rules! send_ok {
 
 macro_rules! send_commit_ack {
     ($self:expr, $writer:expr, $buf:expr, $topic:expr, $partition:expr, $offset:expr) => {
-        send!($self, $writer, ClientMessage::CommitAck{ topic: $topic, partition: $partition, offset: $offset }, $buf);
+        send!(
+            $self,
+            $writer,
+            ClientMessage::CommitAck {
+                topic: $topic,
+                partition: $partition,
+                offset: $offset
+            },
+            $buf
+        );
     };
 }
 
@@ -122,7 +130,7 @@ pub struct MessageCore {
     client_name: String,
     group_id: Option<String>,
     running: bool,
-    client_codec: ClientCodec,
+    client_encoder: Box<dyn ProtocolEncoder>,
 }
 
 impl MessageCore {
@@ -132,8 +140,9 @@ impl MessageCore {
         idx: u64,
         broker_manager: Arc<BrokerManager>,
         io_pool: ThreadPool,
-        client_codec: ClientCodec,
+        encoder_factory: ProtocolEncoderFactory,
     ) -> MessageCore {
+        let client_encoder = encoder_factory();
         let broker_tx_cache: HashMap<TopicPartition, mpsc::Sender<BrokerMessage>> = HashMap::new();
         let client_name = format!("Client_{}", idx);
         let group_id: Option<String> = None;
@@ -146,7 +155,7 @@ impl MessageCore {
             client_name,
             group_id,
             running: true,
-            client_codec,
+            client_encoder,
         }
     }
 
@@ -325,7 +334,11 @@ impl MessageCore {
                 ClientMessage::StatusOkCount { count: _ } => {
                     // Ignore (or maybe abort client), should not happen...
                 }
-                ClientMessage::CommitAck { topic: _, partition: _, offset: _ } => {
+                ClientMessage::CommitAck {
+                    topic: _,
+                    partition: _,
+                    offset: _,
+                } => {
                     // Ignore (or maybe abort client), should not happen...
                 }
             };
