@@ -28,7 +28,7 @@ enum TopicStartIn {
     Offset,
 }
 
-// This enum represents the valid incoming messages from a client.
+/// This enum represents the valid incoming messages from a client.
 #[derive(Clone, Deserialize)]
 enum ClientIncoming {
     Connect {

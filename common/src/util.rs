@@ -1,4 +1,6 @@
 /// Returns a tuple of the first brace and last brace if found in buf.
+/// Intended to find slices to deserialize with serde.
+/// It is NOT smart about braces embedded in strings.
 pub fn find_brace(buf: &[u8]) -> Option<(usize, usize)> {
     let mut opens = 0;
     let mut count = 0;
