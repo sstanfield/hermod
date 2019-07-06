@@ -90,6 +90,12 @@ macro_rules! send_ok {
     };
 }
 
+macro_rules! send_commit_ack {
+    ($self:expr, $writer:expr, $buf:expr, $topic:expr, $partition:expr, $offset:expr) => {
+        send!($self, $writer, ClientMessage::CommitAck{ topic: $topic, partition: $partition, offset: $offset }, $buf);
+    };
+}
+
 macro_rules! send_err {
     ($self:expr, $writer:expr, $code:expr, $message:expr, $buf:expr) => {
         send!(
@@ -285,7 +291,7 @@ impl MessageCore {
                         error!("Error sending to broker: {}", error);
                         self.running = false;
                     }
-                    send_ok!(self, writer, out_bytes);
+                    send_commit_ack!(self, writer, out_bytes, topic, partition, commit_offset);
                 }
                 ClientMessage::PublishMessage { message } => {
                     let tp = TopicPartition {
@@ -318,6 +324,9 @@ impl MessageCore {
                     // Like the name says...
                 }
                 ClientMessage::StatusOkCount { count: _ } => {
+                    // Ignore (or maybe abort client), should not happen...
+                }
+                ClientMessage::CommitAck { topic: _, partition: _, offset: _ } => {
                     // Ignore (or maybe abort client), should not happen...
                 }
             };

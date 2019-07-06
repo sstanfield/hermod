@@ -32,6 +32,11 @@ pub enum ClientMessage {
     StatusOkCount {
         count: usize,
     },
+    CommitAck {
+        topic: String,
+        partition: u64,
+        offset: u64,
+    },
     StatusError(u32, String),
     Message(Message),
     InternalMessage(Message),

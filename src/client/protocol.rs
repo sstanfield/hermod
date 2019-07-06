@@ -235,6 +235,14 @@ impl ClientCodec {
                 let bytes = v.as_bytes();
                 move_bytes(buf, bytes)
             }
+            ClientMessage::CommitAck{topic, partition, offset} => {
+                let v = format!(
+                    "{{\"CommitAck\":{{\"topic\":\"{}\",\"partition\":{},\"offset\":{}}}}}",
+                    topic, partition, offset
+                );
+                let bytes = v.as_bytes();
+                move_bytes(buf, bytes)
+            }
             ClientMessage::Message(message) => {
                 let v = format!("{{\"Message\":{{\"topic\":\"{}\",\"payload_size\":{},\"checksum\":\"{}\",\"sequence\":{}}}}}",
                                    message.topic, message.payload_size, message.checksum, message.sequence);

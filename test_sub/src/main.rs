@@ -110,12 +110,22 @@ enum ClientIncoming {
         #[serde(default = "empty_string")]
         message: String,
     },
+    CommitAck {
+        topic: String,
+        partition: u64,
+        offset: u64,
+    },
 }
 
 enum DecodedMessage {
     Message{ message: Message },
     StatusOk,
     StatusError{ code: usize, message: String },
+    CommitAck {
+        topic: String,
+        partition: u64,
+        offset: u64,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -163,6 +173,13 @@ impl InMessageCodec {
                             StatusType::OK => Ok(Some(DecodedMessage::StatusOk)),
                             StatusType::Error => Ok(Some(DecodedMessage::StatusError { code, message })),
                         }
+                    }
+                    ClientIncoming::CommitAck {
+                        topic,
+                        partition,
+                        offset,
+                    } => {
+                        result = Ok(Some(DecodedMessage::CommitAck { topic, partition, offset }))
                     }
                 }
             }
@@ -287,6 +304,10 @@ impl Client {
                             }
                             Ok(Some(DecodedMessage::StatusError{ code, message })) => {
                                 println!("XXXX got ERROR, code: {}, message: {}", code, message);
+                                self.decoding = true;
+                            }
+                            Ok(Some(DecodedMessage::CommitAck{ topic, partition, offset })) => {
+                                println!("XXXX got CommitAck, topic: {}, partition: {}, offset: {}", topic, partition, offset);
                                 self.decoding = true;
                             }
                             Ok(None) => {

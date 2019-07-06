@@ -122,11 +122,21 @@ messages after the commit offset:
 {"Commit":
 {
     "topic": "topic",
+    "partition": partition_number, // future use
     "commit_offset": offset to record for this client/topic
 }
 }
 ```
-Server responds with same response for pub (ok/error).
+Server responds with a commit ack:
+```
+{"CommitAck":
+{
+    "topic": "topic",
+    "partition": partition_number, // future use
+    "offset": offset was committed
+}
+}
+```
 
 
 Client responds with:
