@@ -1,5 +1,5 @@
-use futures::channel::mpsc;
 use bytes::Bytes;
+use futures::channel::mpsc;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum MessageType {

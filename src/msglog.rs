@@ -210,7 +210,10 @@ impl MessageLog {
         } else {
             Err(io::Error::new(
                 io::ErrorKind::Other,
-                "Failed to find the message from log!",
+                format!(
+                    "Failed to find the message from log: {}",
+                    self.log_file_name
+                ),
             ))
         }
     }

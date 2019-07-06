@@ -1,6 +1,6 @@
 use std::{io, str};
 
-use bytes::{Bytes, BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
 use super::super::common::*;
 use super::super::types::*;

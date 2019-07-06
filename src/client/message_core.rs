@@ -18,7 +18,7 @@ use super::super::broker::*;
 use super::super::types::*;
 use super::protocol::*;
 
-use log::{error, info};
+use log::{error, info, debug};
 
 macro_rules! get_broker_tx {
     ($self:expr, $partition:expr, $topic:expr, $tx:expr) => {
@@ -57,11 +57,13 @@ macro_rules! new_client {
 
 macro_rules! write_buffer {
     ($self:expr, $writer:expr, $buf:expr) => {
-        if let Err(err) = $writer.write_all($buf).await {
-            error!("Error writing to client, closing: {}", err);
-            $self.running = false;
+        if $buf.len() > 0 {
+            if let Err(err) = $writer.write_all($buf).await {
+                error!("Error writing to client, closing: {}", err);
+                $self.running = false;
+            }
+            $buf.truncate(0);
         }
-        $buf.truncate(0);
     };
 }
 
@@ -149,7 +151,7 @@ impl MessageCore {
         length: u64,
     ) -> WriteHalf<TcpStream> {
         let buf_size = 128000;
-        let mut buf = vec![0; buf_size];
+        let mut buf = vec![0; buf_size]; // XXX share a buffer or something other then allocing it each time...
         let mut file = File::open(&file_name).unwrap();
         file.seek(SeekFrom::Start(start)).unwrap();
         let mut left = length as usize;
@@ -162,6 +164,7 @@ impl MessageCore {
                     break;
                 }
                 Ok(bytes) => {
+                    debug!("Sending {} bytes from log file to client.", bytes);
                     writer.write_all(&buf[..bytes]).await.unwrap(); // XXX no unwrap...
                     left -= bytes;
                 }
@@ -171,6 +174,7 @@ impl MessageCore {
                 }
             }
         }
+        writer.flush();
         writer
     }
 
@@ -200,6 +204,7 @@ impl MessageCore {
                     send_msg!(self, writer, message, out_bytes);
                 }
                 ClientMessage::MessageBatch(file_name, start, length) => {
+                    write_buffer!(self, writer, out_bytes); // Flush buffer first.
                     writer = self
                         .io_pool
                         .spawn_with_handle(MessageCore::send_messages(

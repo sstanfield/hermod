@@ -112,6 +112,12 @@ enum ClientIncoming {
     },
 }
 
+enum DecodedMessage {
+    Message{ message: Message },
+    StatusOk,
+    StatusError{ code: usize, message: String },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 struct InMessageCodec {
     message: Option<Message>,
@@ -122,8 +128,8 @@ impl InMessageCodec {
         InMessageCodec { message: None }
     }
 
-    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Message>, io::Error> {
-        let mut result; //: Result<Option<Message>, io::Error> = Ok(None);
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<DecodedMessage>, io::Error> {
+        let mut result = Ok(None);
         if self.message.is_none() {
             if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
                 buf.advance(first_brace);
@@ -153,8 +159,10 @@ impl InMessageCodec {
                         code,
                         message,
                     } => {
-                        println!("XXXX got status {:?}, {}, {}", status, code, message);
-                        self.message = None;
+                        result = match status {
+                            StatusType::OK => Ok(Some(DecodedMessage::StatusOk)),
+                            StatusType::Error => Ok(Some(DecodedMessage::StatusError { code, message })),
+                        }
                     }
                 }
             }
@@ -166,12 +174,10 @@ impl InMessageCodec {
                 message.payload = buf[..message.payload_size].to_vec();
                 buf.advance(message.payload_size);
                 got_payload = true;
-                result = Ok(Some(message));
+                result = Ok(Some(DecodedMessage::Message{ message }));
             } else {
                 result = Ok(None);
             }
-        } else {
-            result = Ok(None);
         }
         if got_payload {
             self.message = None;
@@ -230,9 +236,9 @@ impl Client {
         })
     }
 
-    async fn commit(&mut self) -> io::Result<()> {
+    /*async fn commit(&mut self) -> io::Result<()> {
         Ok(())
-    }
+    }*/
 
     async fn commit_offset(&mut self, topic: String, partition: u64, offset: u64) -> io::Result<()> {
         let message = format!("{{\"Commit\": {{\"topic\": \"{}\", \"partition\": {}, \"commit_offset\": {}}}}}", topic, partition, offset);
@@ -246,6 +252,11 @@ impl Client {
             let input = if self.decoding {
                 Ok(self.in_bytes.len())
             } else {
+                        // Reclaim the entire buffer and copy leftover bytes to front.
+                        self.in_bytes.reserve(self.buf_size - self.in_bytes.len());
+                        unsafe {
+                            self.in_bytes.set_len(self.buf_size);
+                        }
                 self
                 .reader
                 .read(&mut self.in_bytes[self.leftover_bytes..])
@@ -254,21 +265,29 @@ impl Client {
             match input
             {
                 Ok(bytes) => {
+                //println!("XXXX c1: {}", bytes);
                     if bytes == 0 && !self.decoding {
                         error!("Remote publisher done.");
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        "Remote broker done, closing!",
-                    ));
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "Remote broker done, closing!",
+                        ));
                     } else {
                         self.decoding = false;
                         self.in_bytes.truncate(self.leftover_bytes + bytes);
                         self.leftover_bytes = 0;
                         match self.codec.decode(&mut self.in_bytes) {
-                            Ok(Some(message)) => {
+                            Ok(Some(DecodedMessage::Message{ message })) => {
                                 self.decoding = true;
-                                self.leftover_bytes = 0;
                                 return Ok(message);
+                            }
+                            Ok(Some(DecodedMessage::StatusOk)) => {
+                                println!("XXXX got OK status");
+                                self.decoding = true;
+                            }
+                            Ok(Some(DecodedMessage::StatusError{ code, message })) => {
+                                println!("XXXX got ERROR, code: {}, message: {}", code, message);
+                                self.decoding = true;
                             }
                             Ok(None) => {
                                 if !self.in_bytes.is_empty() {
@@ -279,11 +298,6 @@ impl Client {
                                 error!("Decode error: {}", error);
                                 return Err(error);
                             }
-                        }
-                        // Reclaim the entire buffer and copy leftover bytes to front.
-                        self.in_bytes.reserve(self.buf_size - self.in_bytes.len());
-                        unsafe {
-                            self.in_bytes.set_len(self.buf_size);
                         }
                     }
                 }
