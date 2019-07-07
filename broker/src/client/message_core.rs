@@ -109,7 +109,10 @@ macro_rules! send_err {
         send!(
             $self,
             $writer,
-            ClientMessage::StatusError($code, $message),
+            ClientMessage::StatusError {
+                code: $code,
+                message: $message
+            },
             $buf
         );
     };
@@ -117,7 +120,12 @@ macro_rules! send_err {
 
 macro_rules! send_msg {
     ($self:expr, $writer:expr, $message:expr, $buf:expr) => {
-        send!($self, $writer, ClientMessage::Message($message), $buf);
+        send!(
+            $self,
+            $writer,
+            ClientMessage::Message { message: $message },
+            $buf
+        );
     };
 }
 
@@ -205,19 +213,23 @@ impl MessageCore {
                     self.running = false;
                     continue;
                 }
-                ClientMessage::StatusError(code, message) => {
+                ClientMessage::StatusError { code, message } => {
                     send_err!(self, writer, code, message, out_bytes);
                 }
                 ClientMessage::StatusOk => {
                     send_ok!(self, writer, out_bytes);
                 }
-                ClientMessage::InternalMessage(message) => {
+                ClientMessage::InternalMessage { message } => {
                     //println!("XXXX internal {}: {}", message.topic, std::str::from_utf8(&message.payload[..]).unwrap());
                 }
-                ClientMessage::Message(message) => {
+                ClientMessage::Message { message } => {
                     send_msg!(self, writer, message, out_bytes);
                 }
-                ClientMessage::MessageBatch(file_name, start, length) => {
+                ClientMessage::MessageBatch {
+                    file_name,
+                    start,
+                    length,
+                } => {
                     write_buffer!(self, writer, out_bytes); // Flush buffer first.
                     writer = self
                         .io_pool
@@ -230,9 +242,12 @@ impl MessageCore {
                         .unwrap()
                         .await;
                 }
-                ClientMessage::Connect(name, gid) => {
-                    self.client_name = name;
-                    self.group_id = Some(gid);
+                ClientMessage::Connect {
+                    client_name,
+                    group_id,
+                } => {
+                    self.client_name = client_name;
+                    self.group_id = Some(group_id);
                     send_ok!(self, writer, out_bytes);
                 }
                 ClientMessage::Subscribe { topic, position: _ } => {
@@ -246,7 +261,7 @@ impl MessageCore {
                 ClientMessage::Unsubscribe { topic: _ } => {
                     send_ok!(self, writer, out_bytes);
                 }
-                ClientMessage::IncomingStatus(status) => {
+                ClientMessage::IncomingStatus { status } => {
                     if status.to_lowercase().eq("close") {
                         info!("Client close request.");
                         self.running = false;

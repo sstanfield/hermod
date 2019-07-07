@@ -164,7 +164,10 @@ impl ProtocolDecoder for ClientDecoder {
                         client_name,
                         group_id,
                     } => {
-                        result = Ok(Some(ClientMessage::Connect(client_name, group_id)));
+                        result = Ok(Some(ClientMessage::Connect {
+                            client_name,
+                            group_id,
+                        }));
                     }
                     ClientIncoming::Subscribe {
                         topic,
@@ -186,7 +189,7 @@ impl ProtocolDecoder for ClientDecoder {
                         result = Ok(Some(ClientMessage::Unsubscribe { topic }));
                     }
                     ClientIncoming::Status { status } => {
-                        result = Ok(Some(ClientMessage::IncomingStatus(status)));
+                        result = Ok(Some(ClientMessage::IncomingStatus { status }));
                     }
                     ClientIncoming::Commit {
                         topic,
@@ -234,7 +237,7 @@ impl ProtocolEncoder for ClientEncoder {
                 let bytes = v.as_bytes();
                 move_bytes(buf, bytes)
             }
-            ClientMessage::StatusError(code, message) => {
+            ClientMessage::StatusError { code, message } => {
                 let v = format!(
                     "{{\"Status\":{{\"status\":\"ERROR\",\"code\":{},\"message\":\"{}\"}}}}",
                     code, message
@@ -254,7 +257,7 @@ impl ProtocolEncoder for ClientEncoder {
                 let bytes = v.as_bytes();
                 move_bytes(buf, bytes)
             }
-            ClientMessage::Message(message) => {
+            ClientMessage::Message { message } => {
                 let v = format!("{{\"Message\":{{\"topic\":\"{}\",\"payload_size\":{},\"checksum\":\"{}\",\"sequence\":{}}}}}",
                                    message.topic, message.payload_size, message.checksum, message.sequence);
                 let bytes = v.as_bytes();

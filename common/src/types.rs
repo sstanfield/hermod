@@ -55,13 +55,29 @@ pub enum ClientMessage {
         partition: u64,
         offset: u64,
     },
-    StatusError(u32, String),
-    Message(Message),
-    InternalMessage(Message),
-    MessageBatch(String, u64, u64),
+    StatusError {
+        code: u32,
+        message: String,
+    },
+    Message {
+        message: Message,
+    },
+    InternalMessage {
+        message: Message,
+    },
+    MessageBatch {
+        file_name: String,
+        start: u64,
+        length: u64,
+    },
     Over,
-    Connect(String, String),
-    IncomingStatus(String),
+    Connect {
+        client_name: String,
+        group_id: String,
+    },
+    IncomingStatus {
+        status: String,
+    },
     Commit {
         topic: String,
         partition: u64,

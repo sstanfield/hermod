@@ -163,9 +163,13 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                     let mut tx = client.tx.clone();
                     let is_internal = client.is_internal;
                     let message = if is_internal {
-                        ClientMessage::InternalMessage(message.clone())
+                        ClientMessage::InternalMessage {
+                            message: message.clone(),
+                        }
                     } else {
-                        ClientMessage::Message(message.clone())
+                        ClientMessage::Message {
+                            message: message.clone(),
+                        }
                     };
                     if let Err(_) = tx.send(message).await {
                         bad_clients.push(tx_key.clone());
@@ -197,11 +201,11 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                         if info.is_ok() {
                             let info = info.unwrap();
                             if let Err(error) = tx
-                                .send(ClientMessage::MessageBatch(
-                                    msg_log.log_file_name(),
-                                    info.position,
-                                    msg_log.log_file_end() - info.position,
-                                ))
+                                .send(ClientMessage::MessageBatch {
+                                    file_name: msg_log.log_file_name(),
+                                    start: info.position,
+                                    length: msg_log.log_file_end() - info.position,
+                                })
                                 .await
                             {
                                 bad_client = true;

@@ -17,7 +17,10 @@ async fn send_client_error(
     message: &str,
 ) {
     if let Err(_) = message_incoming_tx
-        .send(ClientMessage::StatusError(code, message.to_string()))
+        .send(ClientMessage::StatusError {
+            code,
+            message: message.to_string(),
+        })
         .await
     {
         error!("Error sending client status error, {}: {}!", code, message);
