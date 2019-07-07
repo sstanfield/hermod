@@ -9,8 +9,16 @@ fn zero_val() -> usize {
     0
 }
 
+fn zero_val_u32() -> u32 {
+    0
+}
+
 fn zero_val_u64() -> u64 {
     0
+}
+
+fn empty_string() -> String {
+    String::new()
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -30,7 +38,7 @@ enum TopicStartIn {
 
 /// This enum represents the valid incoming messages from a client.
 #[derive(Clone, Deserialize)]
-enum ClientIncoming {
+enum ServerIncoming {
     Connect {
         client_name: String,
         group_id: String,
@@ -75,16 +83,16 @@ fn move_bytes(buf: &mut BytesMut, bytes: &[u8]) -> EncodeStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct ClientDecoder {
+pub struct ServerDecoder {
     message: Option<Message>,
     in_batch: bool,
     batch_count: usize,
     expected_batch_count: usize,
 }
 
-impl ClientDecoder {
-    pub fn new() -> ClientDecoder {
-        ClientDecoder {
+impl ServerDecoder {
+    pub fn new() -> ServerDecoder {
+        ServerDecoder {
             message: None,
             in_batch: false,
             batch_count: 0,
@@ -93,16 +101,16 @@ impl ClientDecoder {
     }
 }
 
-impl ProtocolDecoder for ClientDecoder {
+impl ProtocolDecoder for ServerDecoder {
     fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<ClientMessage>> {
         let mut result: io::Result<Option<ClientMessage>> = Ok(None);
         if self.message.is_none() {
             if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
                 buf.advance(first_brace);
                 let line = buf.split_to((message_offset - first_brace) + 1);
-                let incoming: ClientIncoming = serde_json::from_slice(&line[..])?;
+                let incoming: ServerIncoming = serde_json::from_slice(&line[..])?;
                 match incoming {
-                    ClientIncoming::Publish {
+                    ServerIncoming::Publish {
                         topic,
                         payload_size,
                         checksum,
@@ -131,7 +139,7 @@ impl ProtocolDecoder for ClientDecoder {
                         };
                         self.message = Some(message);
                     }
-                    ClientIncoming::Batch { batch_type, count } => match batch_type {
+                    ServerIncoming::Batch { batch_type, count } => match batch_type {
                         BatchType::Start => {
                             self.in_batch = true;
                             result = Ok(Some(ClientMessage::Noop));
@@ -160,7 +168,7 @@ impl ProtocolDecoder for ClientDecoder {
                         }
                     },
 
-                    ClientIncoming::Connect {
+                    ServerIncoming::Connect {
                         client_name,
                         group_id,
                     } => {
@@ -169,7 +177,7 @@ impl ProtocolDecoder for ClientDecoder {
                             group_id,
                         }));
                     }
-                    ClientIncoming::Subscribe {
+                    ServerIncoming::Subscribe {
                         topic,
                         position,
                         offset,
@@ -185,13 +193,13 @@ impl ProtocolDecoder for ClientDecoder {
                             position: new_pos,
                         }));
                     }
-                    ClientIncoming::Unsubscribe { topic } => {
+                    ServerIncoming::Unsubscribe { topic } => {
                         result = Ok(Some(ClientMessage::Unsubscribe { topic }));
                     }
-                    ClientIncoming::Status { status } => {
+                    ServerIncoming::Status { status } => {
                         result = Ok(Some(ClientMessage::IncomingStatus { status }));
                     }
-                    ClientIncoming::Commit {
+                    ServerIncoming::Commit {
                         topic,
                         partition,
                         commit_offset,
@@ -221,10 +229,122 @@ impl ProtocolDecoder for ClientDecoder {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct ClientEncoder;
+#[derive(Deserialize, Clone, Debug)]
+enum StatusType {
+    OK,
+    Error,
+}
 
-impl ProtocolEncoder for ClientEncoder {
+#[derive(Deserialize)]
+//#[serde(untagged)]
+enum ClientIncoming {
+    Message {
+        topic: String,
+        payload_size: usize,
+        checksum: String,
+        sequence: u64,
+    },
+    Status {
+        status: StatusType,
+        #[serde(default = "zero_val_u32")]
+        code: u32,
+        #[serde(default = "empty_string")]
+        message: String,
+    },
+    CommitAck {
+        topic: String,
+        partition: u64,
+        offset: u64,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+struct ClientDecoder {
+    message: Option<Message>,
+}
+
+impl ClientDecoder {
+    pub fn new() -> ClientDecoder {
+        ClientDecoder { message: None }
+    }
+}
+
+impl ProtocolDecoder for ClientDecoder {
+    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<ClientMessage>> {
+        let mut result = Ok(None);
+        if self.message.is_none() {
+            if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
+                buf.advance(first_brace);
+                let line = buf.split_to(message_offset + 1);
+                //println!("XXXX decoding: {}", String::from_utf8(line.to_vec()).unwrap());
+                let incoming: ClientIncoming = serde_json::from_slice(&line[..])?;
+                match incoming {
+                    ClientIncoming::Message {
+                        topic,
+                        payload_size,
+                        checksum,
+                        sequence,
+                    } => {
+                        let message_type = MessageType::Message;
+                        let message = Message {
+                            message_type,
+                            topic,
+                            payload_size,
+                            checksum,
+                            sequence,
+                            payload: vec![],
+                        };
+                        self.message = Some(message);
+                    }
+                    ClientIncoming::Status {
+                        status,
+                        code,
+                        message,
+                    } => {
+                        result = match status {
+                            StatusType::OK => Ok(Some(ClientMessage::StatusOk)),
+                            StatusType::Error => {
+                                Ok(Some(ClientMessage::StatusError { code, message }))
+                            }
+                        }
+                    }
+                    ClientIncoming::CommitAck {
+                        topic,
+                        partition,
+                        offset,
+                    } => {
+                        result = Ok(Some(ClientMessage::CommitAck {
+                            topic,
+                            partition,
+                            offset,
+                        }))
+                    }
+                }
+            }
+        }
+        let mut got_payload = false;
+        if let Some(message) = &self.message {
+            let mut message = message.clone();
+            if buf.len() >= message.payload_size {
+                message.payload = buf[..message.payload_size].to_vec();
+                buf.advance(message.payload_size);
+                got_payload = true;
+                result = Ok(Some(ClientMessage::Message { message }));
+            } else {
+                result = Ok(None);
+            }
+        }
+        if got_payload {
+            self.message = None;
+        }
+        result
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct Encoder;
+
+impl ProtocolEncoder for Encoder {
     fn encode(&mut self, buf: &mut BytesMut, message: ClientMessage) -> EncodeStatus {
         match message {
             ClientMessage::StatusOk => {
@@ -278,9 +398,13 @@ impl ProtocolEncoder for ClientEncoder {
 }
 
 pub fn decoder_factory() -> Box<dyn ProtocolDecoder> {
+    Box::new(ServerDecoder::new())
+}
+
+pub fn client_decoder_factory() -> Box<dyn ProtocolDecoder> {
     Box::new(ClientDecoder::new())
 }
 
 pub fn encoder_factory() -> Box<dyn ProtocolEncoder> {
-    Box::new(ClientEncoder {})
+    Box::new(Encoder {})
 }
