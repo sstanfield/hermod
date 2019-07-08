@@ -88,6 +88,28 @@ impl Client {
         })
     }
 
+    pub async fn reconnect(&mut self,) -> io::Result<()> {
+        self.in_bytes.resize(self.buf_size, 0);
+        self.out_bytes.truncate(0);
+        self.scratch_bytes.truncate(0);
+        self.leftover_bytes = 0;
+        let remote = format!("{}:{}", self.host, self.port);
+        let stream = TcpStream::connect(&remote.parse().unwrap()).await?;
+        let (reader, writer) = stream.split();
+        self.reader = reader;
+        self.writer = writer;
+        write_client!(
+            self.encoder,
+            self.writer,
+            self.scratch_bytes,
+            ClientMessage::Connect {
+                client_name: self.client_name.clone(),
+                group_id: self.group_id.clone()
+            }
+        );
+        Ok(())
+    }
+
     pub async fn subscribe(&mut self, topic: String, position: TopicStart) -> io::Result<()> {
         write_client!(
             self.encoder,

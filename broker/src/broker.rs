@@ -16,9 +16,6 @@ use serde_json;
 
 #[derive(Deserialize)]
 struct OffsetRecord {
-    group_id: String,
-    partition: u64,
-    topic: String,
     offset: u64,
 }
 

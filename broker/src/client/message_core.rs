@@ -219,7 +219,7 @@ impl MessageCore {
                 ClientMessage::StatusOk => {
                     send_ok!(self, writer, out_bytes);
                 }
-                ClientMessage::InternalMessage { message } => {
+                ClientMessage::InternalMessage { message: _ } => {
                     //println!("XXXX internal {}: {}", message.topic, std::str::from_utf8(&message.payload[..]).unwrap());
                 }
                 ClientMessage::Message { message } => {
@@ -299,9 +299,7 @@ impl MessageCore {
                         .broker_tx_cache
                         .entry(tp.clone())
                         .or_insert(self.broker_manager.get_broker_tx(tp.clone()).await.unwrap());
-                    let payload = format!(
-                        "{{\"group_id\": \"{}\", \"partition\": {}, \"topic\": \"{}\", \"offset\": {}}}",
-                        group_id, partition, topic, commit_offset).into_bytes();
+                    let payload = format!("{{\"offset\":{}}}", commit_offset).into_bytes();
                     let message = Message {
                         message_type: MessageType::Message,
                         topic: commit_topic,
