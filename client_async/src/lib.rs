@@ -88,7 +88,7 @@ impl Client {
         })
     }
 
-    pub async fn reconnect(&mut self,) -> io::Result<()> {
+    pub async fn reconnect(&mut self) -> io::Result<()> {
         self.in_bytes.resize(self.buf_size, 0);
         self.out_bytes.truncate(0);
         self.scratch_bytes.truncate(0);

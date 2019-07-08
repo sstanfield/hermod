@@ -89,15 +89,16 @@ impl MessageLog {
         let idx_end = idx_append.seek(SeekFrom::Current(0))?;
         let mut idx_read = File::open(&log_file_idx_name)?;
 
-        let mut offset = 0;
-        if idx_end > LogIndex::size() as u64 && !single_record {
+        let offset = if idx_end > LogIndex::size() as u64 && !single_record {
             idx_read.seek(SeekFrom::Start(idx_end - LogIndex::size() as u64))?;
             let mut idx = LogIndex::empty();
             unsafe {
-                idx_read.read(idx.as_bytes_mut())?;
+                idx_read.read_exact(idx.as_bytes_mut())?;
             }
-            offset = idx.offset + 1;
-        }
+            idx.offset + 1
+        } else {
+            0
+        };
 
         Ok(MessageLog {
             log_file_name,
@@ -123,8 +124,8 @@ impl MessageLog {
             self.idx_append.seek(SeekFrom::Start(0))?;
             self.idx_append.set_len(0)?;
         }
-        self.log_append.write(v.as_bytes())?;
-        self.log_append.write(&message.payload)?;
+        self.log_append.write_all(v.as_bytes())?;
+        self.log_append.write_all(&message.payload)?;
         self.log_append.flush()?;
         let idx = LogIndex {
             offset: message.sequence as u64,
@@ -136,7 +137,7 @@ impl MessageLog {
         // XXX Verify the entire message was written?
         self.log_end += (v.as_bytes().len() + message.payload_size) as u64;
         unsafe {
-            self.idx_append.write(idx.as_bytes())?;
+            self.idx_append.write_all(idx.as_bytes())?;
         }
         self.idx_append.flush()?;
         self.idx_end += std::mem::size_of::<LogIndex>() as u64;
@@ -152,7 +153,7 @@ impl MessageLog {
         idx_read.seek(SeekFrom::Start(pos))?;
         let mut idx = LogIndex::empty();
         unsafe {
-            idx_read.read(idx.as_bytes_mut())?;
+            idx_read.read_exact(idx.as_bytes_mut())?;
         }
         Ok(idx)
     }
@@ -187,7 +188,7 @@ impl MessageLog {
         }
         if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
             let message: MessageFromLog =
-                serde_json::from_slice(&buf[first_brace..message_offset + 1])?;
+                serde_json::from_slice(&buf[first_brace..=message_offset])?;
             match message {
                 MessageFromLog::Message {
                     topic,
@@ -199,10 +200,10 @@ impl MessageLog {
                     let payload = buf[len - payload_size..].to_vec();
                     Ok(Message {
                         message_type: MessageType::Message,
-                        topic: topic,
-                        payload_size: payload_size,
-                        checksum: checksum,
-                        sequence: sequence,
+                        topic,
+                        payload_size,
+                        checksum,
+                        sequence,
                         payload,
                     })
                 }

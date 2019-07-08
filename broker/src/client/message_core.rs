@@ -39,7 +39,7 @@ macro_rules! new_client {
     ($self:expr, $partition:expr, $topic:expr, $internal:expr) => {
         let tx: &mut mpsc::Sender<BrokerMessage>;
         get_broker_tx!($self, $partition, $topic, tx);
-        if let Err(_) = tx
+        if let Err(err) = tx
             .send(BrokerMessage::NewClient(
                 $self.client_name.to_string(),
                 $self.group_id.clone().unwrap(),
@@ -48,7 +48,7 @@ macro_rules! new_client {
             ))
             .await
         {
-            error!("Error sending message to broker, close client.");
+            error!("Error sending message to broker, close client: {}", err);
             $self.running = false;
         }
     };
@@ -173,7 +173,7 @@ impl MessageCore {
         start: u64,
         length: u64,
     ) -> WriteHalf<TcpStream> {
-        let buf_size = 128000;
+        let buf_size = 128_000;
         let mut buf = vec![0; buf_size]; // XXX share a buffer or something other then allocing it each time...
         let mut file = File::open(&file_name).unwrap();
         file.seek(SeekFrom::Start(start)).unwrap();
@@ -219,7 +219,7 @@ impl MessageCore {
                 ClientMessage::StatusOk => {
                     send_ok!(self, writer, out_bytes);
                 }
-                ClientMessage::InternalMessage { message: _ } => {
+                ClientMessage::InternalMessage { .. } => {
                     //println!("XXXX internal {}: {}", message.topic, std::str::from_utf8(&message.payload[..]).unwrap());
                 }
                 ClientMessage::Message { message } => {
@@ -250,7 +250,8 @@ impl MessageCore {
                     self.group_id = Some(group_id);
                     send_ok!(self, writer, out_bytes);
                 }
-                ClientMessage::Subscribe { topic, position: _ } => {
+                ClientMessage::Subscribe { topic, .. } => {
+                    // XXX use position: _ } => {
                     // XXX Validate connection.
                     for topic in self.broker_manager.expand_topics(topic).await {
                         new_client!(self, 0, topic, false);
@@ -258,7 +259,8 @@ impl MessageCore {
                     }
                     send_ok!(self, writer, out_bytes);
                 }
-                ClientMessage::Unsubscribe { topic: _ } => {
+                ClientMessage::Unsubscribe { .. } => {
+                    // XXX implement... topic: _ } => {
                     send_ok!(self, writer, out_bytes);
                 }
                 ClientMessage::IncomingStatus { status } => {
@@ -295,10 +297,11 @@ impl MessageCore {
                         partition: 0,
                         topic: commit_topic.clone(),
                     };
-                    let tx = self
-                        .broker_tx_cache
-                        .entry(tp.clone())
-                        .or_insert(self.broker_manager.get_broker_tx(tp.clone()).await.unwrap());
+                    let mut tx = if self.broker_tx_cache.contains_key(&tp) {
+                        self.broker_tx_cache.get(&tp).unwrap().clone()
+                    } else {
+                        self.broker_manager.get_broker_tx(tp).await.unwrap()
+                    };
                     let payload = format!("{{\"offset\":{}}}", commit_offset).into_bytes();
                     let message = Message {
                         message_type: MessageType::Message,
@@ -321,9 +324,12 @@ impl MessageCore {
                     };
                     let message_type = message.message_type.clone();
                     if message.payload_size > 0 {
-                        let tx = self.broker_tx_cache.entry(tp.clone()).or_insert(
-                            self.broker_manager.get_broker_tx(tp.clone()).await.unwrap(),
-                        );
+                        // XXX de-dup with above
+                        let mut tx = if self.broker_tx_cache.contains_key(&tp) {
+                            self.broker_tx_cache.get(&tp).unwrap().clone()
+                        } else {
+                            self.broker_manager.get_broker_tx(tp).await.unwrap()
+                        };
                         if let Err(error) = tx.send(BrokerMessage::Message(message)).await {
                             error!("Error sending to broker: {}", error);
                             self.running = false;
@@ -344,17 +350,13 @@ impl MessageCore {
                 ClientMessage::Noop => {
                     // Like the name says...
                 }
-                ClientMessage::StatusOkCount { count: _ } => {
+                ClientMessage::StatusOkCount { .. } => {
                     // Ignore (or maybe abort client), should not happen...
                 }
-                ClientMessage::PublishBatchStart { count: _ } => {
+                ClientMessage::PublishBatchStart { .. } => {
                     // Ignore (or maybe abort client), should not happen...
                 }
-                ClientMessage::CommitAck {
-                    topic: _,
-                    partition: _,
-                    offset: _,
-                } => {
+                ClientMessage::CommitAck { .. } => {
                     // Ignore (or maybe abort client), should not happen...
                 }
             };

@@ -9,28 +9,31 @@ use romio::TcpStream;
 
 use common::types::*;
 
-use log::{error, info};
+use log::{debug, error, info};
 
 async fn send_client_error(
     mut message_incoming_tx: mpsc::Sender<ClientMessage>,
     code: u32,
     message: &str,
 ) {
-    if let Err(_) = message_incoming_tx
+    if let Err(err) = message_incoming_tx
         .send(ClientMessage::StatusError {
             code,
             message: message.to_string(),
         })
         .await
     {
-        error!("Error sending client status error, {}: {}!", code, message);
+        error!(
+            "Error sending client status error, {}: {}.  Error: {}",
+            code, message, err
+        );
     }
 }
 
 macro_rules! send {
     ($tx:expr, $message:expr, $cont:expr, $error_msg:expr) => {
-        if let Err(_) = $tx.send($message).await {
-            error!($error_msg);
+        if let Err(err) = $tx.send($message).await {
+            error!("{}, error: {}", $error_msg, err);
             $cont = false;
         }
     };
@@ -113,7 +116,8 @@ pub async fn client_incoming(
             }
         }
     }
-    if let Err(_) = message_incoming_tx.send(ClientMessage::Over).await {
+    if let Err(err) = message_incoming_tx.send(ClientMessage::Over).await {
+        debug!("Got error when on client exit, not important: {}", err);
         // ignore, no longer matters...
     }
 }

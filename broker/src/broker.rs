@@ -26,12 +26,14 @@ pub enum BrokerMessage {
     CloseClient(String),
 }
 
+struct BrokerData {
+    brokers: HashMap<TopicPartition, mpsc::Sender<BrokerMessage>>,
+    threadpool: ThreadPool,
+    topic_online_tx: mpsc::Sender<BrokerMessage>,
+}
+
 pub struct BrokerManager {
-    brokers: Mutex<(
-        HashMap<TopicPartition, mpsc::Sender<BrokerMessage>>,
-        ThreadPool,
-        mpsc::Sender<BrokerMessage>,
-    )>,
+    brokers: Mutex<BrokerData>,
 }
 
 impl BrokerManager {
@@ -42,31 +44,34 @@ impl BrokerManager {
         };
         let (topic_online_tx, rx) = mpsc::channel::<BrokerMessage>(1000);
         //let (topic_online_tx, rx) = mpsc::unbounded::<BrokerMessage>();
-        if let Err(_) = threadpool.spawn(new_message_broker(rx, tp.clone())) {
+        if let Err(err) = threadpool.spawn(new_message_broker(rx, tp.clone())) {
             error!(
-                "Got error spawning task for partion {}, topic {}",
-                tp.partition, tp.topic
+                "Got error spawning task for partion {}, topic {}, error: {}",
+                tp.partition, tp.topic, err
             );
         }
         let mut hm = HashMap::new();
         hm.insert(tp, topic_online_tx.clone());
         BrokerManager {
-            brokers: Mutex::new((hm, threadpool, topic_online_tx)),
+            brokers: Mutex::new(BrokerData {
+                brokers: hm,
+                threadpool,
+                topic_online_tx,
+            }),
         }
     }
 
     pub async fn expand_topics(&self, topic_name: String) -> Vec<String> {
         let mut result = Vec::<String>::new();
-        if topic_name.trim().ends_with("*") {
+        if topic_name.trim().ends_with('*') {
             let len = topic_name.len();
-            let mut data = self.brokers.lock().await;
-            let brokers = &mut data.0;
+            let data = self.brokers.lock().await;
             if len == 1 {
-                for key in brokers.keys() {
+                for key in data.brokers.keys() {
                     result.push(key.topic.clone());
                 }
             } else {
-                for key in brokers.keys() {
+                for key in data.brokers.keys() {
                     if key.topic.starts_with(&topic_name[..len - 1]) {
                         result.push(key.topic.clone());
                     }
@@ -85,24 +90,18 @@ impl BrokerManager {
         let mut data = self.brokers.lock().await;
         let partition = tp.partition;
         let topic = tp.topic.clone(); // Use for error logging.
-        let brokers = &mut data.0;
-        if brokers.contains_key(&tp) {
-            return Ok(brokers.get(&tp).unwrap().clone());
+        if data.brokers.contains_key(&tp) {
+            return Ok(data.brokers.get(&tp).unwrap().clone());
         }
         let (tx, rx) = mpsc::channel::<BrokerMessage>(1000);
-        //let (tx, rx) = mpsc::unbounded::<BrokerMessage>();
-        brokers.insert(tp.clone(), tx.clone());
-        drop(brokers);
-        let threadpool = &mut data.1;
-        if let Err(_) = threadpool.spawn(new_message_broker(rx, tp.clone())) {
+        data.brokers.insert(tp.clone(), tx.clone());
+        if let Err(err) = data.threadpool.spawn(new_message_broker(rx, tp.clone())) {
             error!(
-                "Got error spawning task for partion {}, topic {}",
-                partition, topic
+                "Got error spawning task for partion {}, topic {}, error: {}",
+                partition, topic, err
             );
             Err(())
         } else {
-            drop(threadpool);
-            let topic_online_tx = &mut data.2;
             let payload = format!(
                 "{{\"partition\": {}, \"topic\": \"{}\"}}",
                 tp.partition, tp.topic
@@ -116,7 +115,11 @@ impl BrokerManager {
                 sequence: 0,
                 payload,
             };
-            if let Err(error) = topic_online_tx.send(BrokerMessage::Message(message)).await {
+            if let Err(error) = data
+                .topic_online_tx
+                .send(BrokerMessage::Message(message))
+                .await
+            {
                 error!("Error sending to broker: {}", error);
             }
 
@@ -168,7 +171,8 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                             message: message.clone(),
                         }
                     };
-                    if let Err(_) = tx.send(message).await {
+                    if let Err(err) = tx.send(message).await {
+                        error!("Error writiing to client, will close. {}", err);
                         bad_clients.push(tx_key.clone());
                     }
                 }
