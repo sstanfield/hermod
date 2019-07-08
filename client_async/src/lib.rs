@@ -153,7 +153,7 @@ impl Client {
     }
 
     pub async fn end_pub_batch(&mut self) -> io::Result<()> {
-        if self.in_publish_batch && self.out_bytes.len() > 0 && self.batch_count > 0 {
+        if self.in_publish_batch && !self.out_bytes.is_empty() && self.batch_count > 0 {
             write_client!(
                 self.encoder,
                 self.writer,
@@ -193,13 +193,11 @@ impl Client {
                 self.writer.write_all(&bytes).await?;
                 self.out_bytes.truncate(0);
             }
+        } else if self.in_publish_batch {
+            self.batch_count += 1;
         } else {
-            if self.in_publish_batch {
-                self.batch_count += 1;
-            } else {
-                self.writer.write_all(&self.out_bytes).await?;
-                self.out_bytes.truncate(0);
-            }
+            self.writer.write_all(&self.out_bytes).await?;
+            self.out_bytes.truncate(0);
         }
         Ok(())
     }

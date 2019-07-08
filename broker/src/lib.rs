@@ -1,4 +1,4 @@
-#![feature(async_await, async_closure)]
+#![feature(async_await)]
 
 #[macro_use]
 extern crate serde_derive;
