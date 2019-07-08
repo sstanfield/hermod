@@ -4,5 +4,5 @@ members = [
     "broker",
     "common",
     "client_async",
-    "test_sub",
+    "test_client",
 ]

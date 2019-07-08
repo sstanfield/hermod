@@ -2,14 +2,23 @@
 
 use std::io;
 
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use futures::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 
 use log::error;
 use romio::TcpStream;
 
-use common::protocolx::*;
 use common::types::*;
+
+macro_rules! write_client {
+    ($encoder:expr, $writer:expr, $buf:expr, $mes:expr) => {
+        if let EncodeStatus::BufferToSmall(_bytes) = $encoder.encode(&mut $buf, $mes) {
+            // XXX cant happen unless buffer is made tiny, return an error.
+        }
+        $writer.write_all(&$buf).await?;
+        $buf.truncate(0);
+    };
+}
 
 pub struct Client {
     host: String,
@@ -17,48 +26,76 @@ pub struct Client {
     reader: ReadHalf<TcpStream>,
     writer: WriteHalf<TcpStream>,
     codec: Box<dyn ProtocolDecoder>,
+    encoder: Box<dyn ProtocolEncoder>,
     buf_size: usize,
     in_bytes: BytesMut,
+    out_bytes: BytesMut,
+    scratch_bytes: BytesMut,
     leftover_bytes: usize,
     decoding: bool,
+    in_publish_batch: bool,
+    batch_count: u32,
+    client_name: String,
+    group_id: String,
 }
 
 impl Client {
-    pub async fn connect(host: String, port: u32) -> io::Result<Client> {
-        let remote = format!("{}:{}", host, port);
-        let stream = TcpStream::connect(&remote.parse().unwrap()).await?;
-        let (reader, mut writer) = stream.split();
-        writer
-            .write_all(
-                //                b"{\"client_name\": \"client1\", \"group_id\": \"g1\", \"topics\": [\"top1\"]}",
-                b"{\"Connect\": {\"client_name\": \"client1\", \"group_id\": \"g1\"}}",
-            )
-            .await?;
-        writer
-            .write_all(
-                //                b"{\"client_name\": \"client1\", \"group_id\": \"g1\", \"topics\": [\"top1\"]}",
-                b"{\"Subscribe\": {\"topic\": \"top1\", \"position\": \"Current\"}}",
-            )
-            .await?;
-        //writer
-        //    .write_all(b"{\"topic\": \"top1\", \"partition\": 0, \"commit_offset\": 0}")
-        //    .await?;
+    pub async fn connect(
+        host: String,
+        port: u32,
+        client_name: String,
+        group_id: String,
+        decoder_factory: ProtocolDecoderFactory,
+        encoder_factory: ProtocolEncoderFactory,
+    ) -> io::Result<Client> {
+        let codec = decoder_factory();
+        let mut encoder = encoder_factory();
         let buf_size = 64000;
         let mut in_bytes = BytesMut::with_capacity(buf_size);
         in_bytes.resize(buf_size, 0);
-        let codec = client_decoder_factory();
+        let out_bytes = BytesMut::with_capacity(buf_size);
+        let mut scratch_bytes = BytesMut::with_capacity(4096);
         let leftover_bytes = 0;
+        let remote = format!("{}:{}", host, port);
+        let stream = TcpStream::connect(&remote.parse().unwrap()).await?;
+        let (reader, mut writer) = stream.split();
+        write_client!(
+            encoder,
+            writer,
+            scratch_bytes,
+            ClientMessage::Connect {
+                client_name: client_name.clone(),
+                group_id: group_id.clone()
+            }
+        );
         Ok(Client {
             host,
             port,
             reader,
             writer,
             codec,
+            encoder,
             buf_size,
             in_bytes,
+            out_bytes,
+            scratch_bytes,
             leftover_bytes,
             decoding: false,
+            in_publish_batch: false,
+            batch_count: 0,
+            client_name,
+            group_id,
         })
+    }
+
+    pub async fn subscribe(&mut self, topic: String, position: TopicStart) -> io::Result<()> {
+        write_client!(
+            self.encoder,
+            self.writer,
+            self.scratch_bytes,
+            ClientMessage::Subscribe { topic, position }
+        );
+        Ok(())
     }
 
     /*async fn commit(&mut self) -> io::Result<()> {
@@ -69,14 +106,79 @@ impl Client {
         &mut self,
         topic: String,
         partition: u64,
-        offset: u64,
+        commit_offset: u64,
     ) -> io::Result<()> {
-        let message = format!(
-            "{{\"Commit\": {{\"topic\": \"{}\", \"partition\": {}, \"commit_offset\": {}}}}}",
-            topic, partition, offset
+        write_client!(
+            self.encoder,
+            self.writer,
+            self.scratch_bytes,
+            ClientMessage::Commit {
+                topic,
+                partition,
+                commit_offset
+            }
         );
-        println!("XXX committing: {}", message);
-        self.writer.write_all(message.as_bytes()).await?;
+        Ok(())
+    }
+
+    pub async fn start_pub_batch(&mut self) -> io::Result<()> {
+        if self.in_publish_batch {
+            self.end_pub_batch().await?;
+        }
+        self.in_publish_batch = true;
+        self.batch_count = 0;
+        Ok(())
+    }
+
+    pub async fn end_pub_batch(&mut self) -> io::Result<()> {
+        if self.in_publish_batch && self.out_bytes.len() > 0 && self.batch_count > 0 {
+            write_client!(
+                self.encoder,
+                self.writer,
+                self.scratch_bytes,
+                ClientMessage::PublishBatchStart {
+                    count: self.batch_count
+                }
+            );
+            self.writer.write_all(&self.out_bytes).await?;
+            self.out_bytes.truncate(0);
+        }
+        self.batch_count = 0;
+        self.in_publish_batch = false;
+        Ok(())
+    }
+
+    pub async fn publish(&mut self, topic: String, payload: &[u8]) -> io::Result<()> {
+        // XXX check that payload is not to large.
+        let packet = ClientMessage::PublishMessage {
+            message: Message {
+                message_type: MessageType::Message,
+                topic,
+                payload_size: payload.len(),
+                checksum: "".to_string(),
+                sequence: 0,
+                payload: Vec::from(payload),
+            },
+        };
+        if let EncodeStatus::BufferToSmall(bytes) = self.encoder.encode(&mut self.out_bytes, packet)
+        {
+            if self.in_publish_batch {
+                self.end_pub_batch().await?;
+                self.start_pub_batch().await?;
+                self.out_bytes.put_slice(&bytes);
+                self.batch_count += 1;
+            } else {
+                self.writer.write_all(&bytes).await?;
+                self.out_bytes.truncate(0);
+            }
+        } else {
+            if self.in_publish_batch {
+                self.batch_count += 1;
+            } else {
+                self.writer.write_all(&self.out_bytes).await?;
+                self.out_bytes.truncate(0);
+            }
+        }
         Ok(())
     }
 
@@ -114,6 +216,10 @@ impl Client {
                             }
                             Ok(Some(ClientMessage::StatusOk)) => {
                                 println!("XXXX got OK status");
+                                self.decoding = true;
+                            }
+                            Ok(Some(ClientMessage::StatusOkCount { count })) => {
+                                println!("XXXX got OK status count: {}", count);
                                 self.decoding = true;
                             }
                             Ok(Some(ClientMessage::StatusError { code, message })) => {

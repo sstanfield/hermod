@@ -108,6 +108,7 @@ impl ProtocolDecoder for ServerDecoder {
             if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
                 buf.advance(first_brace);
                 let line = buf.split_to((message_offset - first_brace) + 1);
+                //println!("XXXX decoding: {}", String::from_utf8(line.to_vec()).unwrap());
                 let incoming: ServerIncoming = serde_json::from_slice(&line[..])?;
                 match incoming {
                     ServerIncoming::Publish {
@@ -250,6 +251,8 @@ enum ClientIncoming {
         code: u32,
         #[serde(default = "empty_string")]
         message: String,
+        #[serde(default = "zero_val")]
+        count: usize,
     },
     CommitAck {
         topic: String,
@@ -300,9 +303,16 @@ impl ProtocolDecoder for ClientDecoder {
                         status,
                         code,
                         message,
+                        count,
                     } => {
                         result = match status {
-                            StatusType::OK => Ok(Some(ClientMessage::StatusOk)),
+                            StatusType::OK => {
+                                if count > 0 {
+                                    Ok(Some(ClientMessage::StatusOkCount { count }))
+                                } else {
+                                    Ok(Some(ClientMessage::StatusOk))
+                                }
+                            }
                             StatusType::Error => {
                                 Ok(Some(ClientMessage::StatusError { code, message }))
                             }
@@ -380,6 +390,100 @@ impl ProtocolEncoder for Encoder {
             ClientMessage::Message { message } => {
                 let v = format!("{{\"Message\":{{\"topic\":\"{}\",\"payload_size\":{},\"checksum\":\"{}\",\"sequence\":{}}}}}",
                                    message.topic, message.payload_size, message.checksum, message.sequence);
+                let bytes = v.as_bytes();
+                if (bytes.len() + message.payload_size) > buf.remaining_mut() {
+                    let mut new_bytes = BytesMut::with_capacity(bytes.len() + message.payload_size);
+                    new_bytes.put_slice(bytes);
+                    new_bytes.put_slice(&message.payload);
+                    EncodeStatus::BufferToSmall(new_bytes.freeze())
+                } else {
+                    buf.put_slice(bytes);
+                    buf.put_slice(&message.payload);
+                    EncodeStatus::Ok
+                }
+            }
+
+            // Client encodings.
+            ClientMessage::Commit {
+                topic,
+                partition,
+                commit_offset,
+            } => {
+                let v = format!(
+                    "{{\"Commit\": {{\"topic\": \"{}\", \"partition\": {}, \"commit_offset\": {}}}}}",
+                    topic, partition, commit_offset
+                );
+                let bytes = v.as_bytes();
+                move_bytes(buf, bytes)
+            }
+            ClientMessage::Connect {
+                client_name,
+                group_id,
+            } => {
+                let v = format!(
+                    "{{\"Connect\": {{\"client_name\": \"{}\", \"group_id\": \"{}\"}}}}",
+                    client_name, group_id
+                );
+                let bytes = v.as_bytes();
+                move_bytes(buf, bytes)
+            }
+            ClientMessage::Subscribe {
+                topic,
+                position: TopicStart::Offset { offset },
+            } => {
+                let v = format!(
+                    "{{\"Subscribe\": {{\"topic\": \"{}\", \"position\": \"Offset\", \"offset\": {}}}}}",
+                    topic, offset
+                );
+                let bytes = v.as_bytes();
+                move_bytes(buf, bytes)
+            }
+            ClientMessage::Subscribe {
+                topic,
+                position: TopicStart::Earliest,
+            } => {
+                let v = format!(
+                    "{{\"Subscribe\": {{\"topic\": \"{}\", \"position\": \"Earliest\"}}}}",
+                    topic
+                );
+                let bytes = v.as_bytes();
+                move_bytes(buf, bytes)
+            }
+            ClientMessage::Subscribe {
+                topic,
+                position: TopicStart::Latest,
+            } => {
+                let v = format!(
+                    "{{\"Subscribe\": {{\"topic\": \"{}\", \"position\": \"Latest\"}}}}",
+                    topic
+                );
+                let bytes = v.as_bytes();
+                move_bytes(buf, bytes)
+            }
+            ClientMessage::Subscribe {
+                topic,
+                position: TopicStart::Current,
+            } => {
+                let v = format!(
+                    "{{\"Subscribe\": {{\"topic\": \"{}\", \"position\": \"Current\"}}}}",
+                    topic
+                );
+                let bytes = v.as_bytes();
+                move_bytes(buf, bytes)
+            }
+            ClientMessage::PublishBatchStart { count } => {
+                let v = format!(
+                    "{{\"Batch\": {{\"batch_type\": \"Count\", \"count\": {}}}}}",
+                    count
+                );
+                let bytes = v.as_bytes();
+                move_bytes(buf, bytes)
+            }
+            ClientMessage::PublishMessage { message } => {
+                let v = format!(
+                    "{{\"Publish\": {{\"topic\": \"{}\", \"payload_size\": {}, \"checksum\": \"\"}}}}",
+                    message.topic, message.payload_size
+                );
                 let bytes = v.as_bytes();
                 if (bytes.len() + message.payload_size) > buf.remaining_mut() {
                     let mut new_bytes = BytesMut::with_capacity(bytes.len() + message.payload_size);

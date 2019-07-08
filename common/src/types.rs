@@ -83,6 +83,9 @@ pub enum ClientMessage {
         partition: u64,
         commit_offset: u64,
     },
+    PublishBatchStart {
+        count: u32,
+    },
     PublishMessage {
         message: Message,
     },

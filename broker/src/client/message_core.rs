@@ -349,6 +349,9 @@ impl MessageCore {
                 ClientMessage::StatusOkCount { count: _ } => {
                     // Ignore (or maybe abort client), should not happen...
                 }
+                ClientMessage::PublishBatchStart { count: _ } => {
+                    // Ignore (or maybe abort client), should not happen...
+                }
                 ClientMessage::CommitAck {
                     topic: _,
                     partition: _,
