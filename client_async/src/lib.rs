@@ -1,4 +1,7 @@
 #![feature(async_await)]
+// XXX This is producing false positives on async fns with reference params.
+// Turn back on when it works...
+#![allow(clippy::needless_lifetimes)]
 
 use std::io;
 
@@ -202,7 +205,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn next(&mut self) -> io::Result<Message> {
+    pub async fn next_message(&mut self) -> io::Result<Message> {
         loop {
             let input = if self.decoding {
                 Ok(self.in_bytes.len())

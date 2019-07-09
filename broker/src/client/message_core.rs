@@ -200,6 +200,16 @@ impl MessageCore {
         writer
     }
 
+    pub async fn get_broker_tx(&mut self, tp: TopicPartition) -> mpsc::Sender<BrokerMessage> {
+        if self.broker_tx_cache.contains_key(&tp) {
+            self.broker_tx_cache.get(&tp).unwrap().clone()
+        } else {
+            let tx = self.broker_manager.get_broker_tx(tp.clone()).await.unwrap();
+            self.broker_tx_cache.insert(tp, tx.clone());
+            tx
+        }
+    }
+
     pub async fn message_incoming(&mut self, mut writer: WriteHalf<TcpStream>) {
         let buf_size = 48000;
         let mut out_bytes = BytesMut::with_capacity(buf_size);
@@ -297,11 +307,11 @@ impl MessageCore {
                         partition: 0,
                         topic: commit_topic.clone(),
                     };
-                    let mut tx = if self.broker_tx_cache.contains_key(&tp) {
+                    let mut tx = self.get_broker_tx(tp).await;/* if self.broker_tx_cache.contains_key(&tp) {
                         self.broker_tx_cache.get(&tp).unwrap().clone()
                     } else {
                         self.broker_manager.get_broker_tx(tp).await.unwrap()
-                    };
+                    };*/
                     let payload = format!("{{\"offset\":{}}}", commit_offset).into_bytes();
                     let message = Message {
                         message_type: MessageType::Message,
@@ -325,11 +335,11 @@ impl MessageCore {
                     let message_type = message.message_type.clone();
                     if message.payload_size > 0 {
                         // XXX de-dup with above
-                        let mut tx = if self.broker_tx_cache.contains_key(&tp) {
+                        let mut tx = self.get_broker_tx(tp).await;/* if self.broker_tx_cache.contains_key(&tp) {
                             self.broker_tx_cache.get(&tp).unwrap().clone()
                         } else {
                             self.broker_manager.get_broker_tx(tp).await.unwrap()
-                        };
+                        };*/
                         if let Err(error) = tx.send(BrokerMessage::Message(message)).await {
                             error!("Error sending to broker: {}", error);
                             self.running = false;

@@ -1,3 +1,7 @@
+// XXX This is producing false positives on async fns with reference params.
+// Turn back on when it works...
+#![allow(clippy::needless_lifetimes)]
+
 use std::collections::HashMap;
 
 use futures::channel::mpsc;

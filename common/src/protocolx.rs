@@ -90,6 +90,17 @@ pub struct ServerDecoder {
     expected_batch_count: usize,
 }
 
+impl Default for ServerDecoder {
+    fn default() -> Self {
+        ServerDecoder {
+            message: None,
+            in_batch: false,
+            batch_count: 0,
+            expected_batch_count: 0,
+        }
+    }
+}
+
 impl ServerDecoder {
     pub fn new() -> ServerDecoder {
         ServerDecoder {
@@ -502,7 +513,7 @@ impl ProtocolEncoder for Encoder {
 }
 
 pub fn decoder_factory() -> Box<dyn ProtocolDecoder> {
-    Box::new(ServerDecoder::new())
+    Box::new(ServerDecoder::default())
 }
 
 pub fn client_decoder_factory() -> Box<dyn ProtocolDecoder> {

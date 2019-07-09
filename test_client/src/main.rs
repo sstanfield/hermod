@@ -75,7 +75,7 @@ fn main() -> io::Result<()> {
                 .subscribe("top1".to_string(), TopicStart::Current)
                 .await?;
             loop {
-                match client.next().await {
+                match client.next_message().await {
                     Ok(message) => {
                         println!(
                             "Message loopy: {}",
@@ -109,7 +109,7 @@ fn main() -> io::Result<()> {
             }
             client.end_pub_batch().await?;
             loop {
-                match client.next().await {
+                match client.next_message().await {
                     Ok(message) => {
                         println!(
                             "Message loopy: {}",
