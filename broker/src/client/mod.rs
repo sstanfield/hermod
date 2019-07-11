@@ -20,7 +20,6 @@ use crate::message_core::*;
 
 pub async fn start_client(
     mut threadpool: ThreadPool,
-    io_pool: ThreadPool,
     broker_manager: Arc<BrokerManager>,
     decoder_factory: ProtocolDecoderFactory,
     encoder_factory: ProtocolEncoderFactory,
@@ -39,7 +38,6 @@ pub async fn start_client(
                 connections,
                 broker_manager.clone(),
                 threadpool.clone(),
-                io_pool.clone(),
                 decoder_factory,
                 encoder_factory,
             ))
@@ -53,7 +51,6 @@ async fn new_client(
     idx: u64,
     broker_manager: Arc<BrokerManager>,
     mut threadpool: ThreadPool,
-    io_pool: ThreadPool,
     decoder_factory: ProtocolDecoderFactory,
     encoder_factory: ProtocolEncoderFactory,
 ) {
@@ -65,8 +62,8 @@ async fn new_client(
     let _client = threadpool
         .spawn_with_handle(client_incoming(broker_tx.clone(), reader, decoder_factory))
         .unwrap();
-    let mut mc = MessageCore::new(broker_tx, rx, idx, broker_manager, io_pool, encoder_factory);
-    mc.message_incoming(writer).await;
+    let mut mc = MessageCore::new(broker_tx, rx, idx, broker_manager, encoder_factory, writer);
+    mc.message_incoming().await;
 
     info!("Closing sub stream from: {}", addr);
 }

@@ -239,6 +239,7 @@ dependencies = [
  "bytes 0.4.12 (registry+https://github.com/rust-lang/crates.io-index)",
  "common 0.1.0",
  "futures-preview 0.3.0-alpha.17 (registry+https://github.com/rust-lang/crates.io-index)",
+ "libc 0.2.58 (registry+https://github.com/rust-lang/crates.io-index)",
  "log 0.4.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "romio 0.3.0-alpha.7 (git+https://github.com/withoutboats/romio)",
  "serde 1.0.92 (registry+https://github.com/rust-lang/crates.io-index)",

@@ -43,7 +43,6 @@ fn main() -> io::Result<()> {
     let mut threadpool = ThreadPoolBuilder::new()
         .name_prefix("hermod Pool")
         .create()?;
-    let io_pool = ThreadPoolBuilder::new().name_prefix("hermod IO").create()?;
 
     let broker_manager = Arc::new(BrokerManager::new(threadpool.clone()));
 
@@ -53,7 +52,6 @@ fn main() -> io::Result<()> {
     ));*/
     threadpool.run(start_client(
         threadpool.clone(),
-        io_pool,
         broker_manager,
         decoder_factory,
         encoder_factory,
