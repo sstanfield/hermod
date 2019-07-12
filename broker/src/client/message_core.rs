@@ -24,64 +24,6 @@ use common::types::*;
 
 use log::{debug, error, info};
 
-macro_rules! get_broker_tx {
-    ($self:expr, $partition:expr, $topic:expr, $tx:expr) => {
-        let tp = TopicPartition {
-            partition: $partition,
-            topic: $topic,
-        };
-        $tx = $self.broker_tx_cache.entry(tp.clone()).or_insert(
-            $self
-                .broker_manager
-                .get_broker_tx(tp.clone())
-                .await
-                .unwrap(),
-        );
-    };
-}
-
-macro_rules! new_client {
-    ($self:expr, $partition:expr, $topic:expr, $internal:expr) => {
-        let tx: &mut mpsc::Sender<BrokerMessage>;
-        get_broker_tx!($self, $partition, $topic, tx);
-        if let Err(err) = tx
-            .send(BrokerMessage::NewClient(
-                $self.client_name.to_string(),
-                $self.group_id.clone().unwrap(),
-                $self.broker_tx.clone(),
-                $internal,
-            ))
-            .await
-        {
-            error!("Error sending message to broker, close client: {}", err);
-            $self.running = false;
-        }
-    };
-}
-
-macro_rules! write_buffer {
-    ($self:expr) => {
-        if $self.out_bytes.len() > 0 {
-            if let Err(err) = $self.writer.write_all(&$self.out_bytes).await {
-                error!("Error writing to client, closing: {}", err);
-                $self.running = false;
-            }
-            $self.out_bytes.truncate(0);
-        }
-    };
-}
-
-macro_rules! send {
-    ($self:expr, $message:expr) => {
-        if let EncodeStatus::BufferToSmall(bytes) =
-            $self.client_encoder.encode(&mut $self.out_bytes, $message)
-        {
-            write_buffer!($self);
-            $self.out_bytes.put_slice(&bytes);
-        }
-    };
-}
-
 pub struct MessageCore {
     broker_tx: mpsc::Sender<ClientMessage>,
     rx: mpsc::Receiver<ClientMessage>,
@@ -121,6 +63,16 @@ impl MessageCore {
             client_encoder,
             writer,
             out_bytes,
+        }
+    }
+
+    async fn write_buffer(&mut self) {
+        if !self.out_bytes.is_empty() {
+            if let Err(err) = self.writer.write_all(&self.out_bytes).await {
+                error!("Error writing to client, closing: {}", err);
+                self.running = false;
+            }
+            self.out_bytes.truncate(0);
         }
     }
 
@@ -199,16 +151,38 @@ impl MessageCore {
         }
     }
 
+    async fn new_client(&mut self, partition: u64, topic: String, internal: bool) {
+        let tp = TopicPartition {
+            partition,
+            topic: topic.clone(),
+        };
+        if let Ok(mut tx) = self.get_broker_tx(tp).await {
+            if let Err(err) = tx
+                .send(BrokerMessage::NewClient(
+                    self.client_name.to_string(),
+                    self.group_id.clone().unwrap(),
+                    self.broker_tx.clone(),
+                    internal,
+                ))
+                .await
+            {
+                error!("Error sending message to broker, close client: {}", err);
+                self.running = false;
+            }
+        } else {
+            error!("Error tx for broker, closing client!");
+            self.running = false;
+        }
+    }
+
     async fn commit(&mut self, topic: String, partition: u64, commit_offset: u64) {
         // XXX should check that the topic/partition are in use by this client.
         if self.group_id.is_none() {
-            send!(
-                self,
-                ClientMessage::StatusError {
-                    code: 503,
-                    message: "Client not initialized, closing connection!".to_string(),
-                }
-            );
+            self.send(ClientMessage::StatusError {
+                code: 503,
+                message: "Client not initialized, closing connection!".to_string(),
+            })
+            .await;
             error!("Error client tried to set topics with no group id, closing client.");
             self.running = false;
         } else {
@@ -232,14 +206,12 @@ impl MessageCore {
                     error!("Error sending to broker: {}", error);
                     self.running = false;
                 }
-                send!(
-                    self,
-                    ClientMessage::CommitAck {
-                        topic,
-                        partition,
-                        offset: commit_offset
-                    }
-                );
+                self.send(ClientMessage::CommitAck {
+                    topic,
+                    partition,
+                    offset: commit_offset,
+                })
+                .await;
             }
         }
     }
@@ -260,14 +232,23 @@ impl MessageCore {
         }
         match message_type {
             MessageType::Message => {
-                send!(self, ClientMessage::StatusOk);
+                self.send(ClientMessage::StatusOk).await;
             }
             MessageType::BatchMessage => {
                 // No feedback during a batch.
             }
             MessageType::BatchEnd { count } => {
-                send!(self, ClientMessage::StatusOkCount { count });
+                self.send(ClientMessage::StatusOkCount { count }).await;
             }
+        }
+    }
+
+    async fn send(&mut self, message: ClientMessage) {
+        if let EncodeStatus::BufferToSmall(bytes) =
+            self.client_encoder.encode(&mut self.out_bytes, message)
+        {
+            self.write_buffer().await;
+            self.out_bytes.put_slice(&bytes);
         }
     }
 
@@ -277,23 +258,24 @@ impl MessageCore {
                 self.running = false;
             }
             ClientMessage::StatusError { code, message } => {
-                send!(self, ClientMessage::StatusError { code, message });
+                self.send(ClientMessage::StatusError { code, message })
+                    .await;
             }
             ClientMessage::StatusOk => {
-                send!(self, ClientMessage::StatusOk);
+                self.send(ClientMessage::StatusOk).await;
             }
             ClientMessage::InternalMessage { .. } => {
                 //println!("XXXX internal {}: {}", message.topic, std::str::from_utf8(&message.payload[..]).unwrap());
             }
             ClientMessage::Message { message } => {
-                send!(self, ClientMessage::Message { message });
+                self.send(ClientMessage::Message { message }).await;
             }
             ClientMessage::MessageBatch {
                 file_name,
                 start,
                 length,
             } => {
-                write_buffer!(self); // Flush buffer first.
+                self.write_buffer().await; // Flush buffer first.
                 self.send_messages(file_name.clone(), start, length).await;
             }
             ClientMessage::Connect {
@@ -302,20 +284,20 @@ impl MessageCore {
             } => {
                 self.client_name = client_name;
                 self.group_id = Some(group_id);
-                send!(self, ClientMessage::StatusOk);
+                self.send(ClientMessage::StatusOk).await;
             }
             ClientMessage::Subscribe { topic, .. } => {
                 // XXX use position: _ } => {
                 // XXX Validate connection.
                 for topic in self.broker_manager.expand_topics(topic).await {
-                    new_client!(self, 0, topic, false);
-                    new_client!(self, 0, "__topic_online".to_string(), true);
+                    self.new_client(0, topic, false).await;
+                    self.new_client(0, "__topic_online".to_string(), true).await;
                 }
-                send!(self, ClientMessage::StatusOk);
+                self.send(ClientMessage::StatusOk).await;
             }
             ClientMessage::Unsubscribe { .. } => {
                 // XXX implement... topic: _ } => {
-                send!(self, ClientMessage::StatusOk);
+                self.send(ClientMessage::StatusOk).await;
             }
             ClientMessage::IncomingStatus { status } => {
                 if status.to_lowercase().eq("close") {
@@ -363,7 +345,7 @@ impl MessageCore {
                 message = m;
             } else {
                 // Need to wait so go ahead and send data to client.
-                write_buffer!(self); //, &mut self.out_bytes);
+                self.write_buffer().await; //, &mut self.out_bytes);
                 message = self.rx.next().await;
             }
         }
