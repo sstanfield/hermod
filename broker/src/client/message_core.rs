@@ -299,11 +299,9 @@ impl MessageCore {
                 // XXX implement... topic: _ } => {
                 self.send(ClientMessage::StatusOk).await;
             }
-            ClientMessage::IncomingStatus { status } => {
-                if status.to_lowercase().eq("close") {
-                    info!("Client close request.");
-                    self.running = false;
-                }
+            ClientMessage::ClientDisconnect => {
+                info!("Client close request.");
+                self.running = false;
             }
             ClientMessage::Commit {
                 topic,

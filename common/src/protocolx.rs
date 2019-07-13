@@ -5,6 +5,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use super::types::*;
 use super::util::*;
 
+use log::{error};
+
 fn zero_val() -> usize {
     0
 }
@@ -209,7 +211,15 @@ impl ProtocolDecoder for ServerDecoder {
                         result = Ok(Some(ClientMessage::Unsubscribe { topic }));
                     }
                     ServerIncoming::Status { status } => {
-                        result = Ok(Some(ClientMessage::IncomingStatus { status }));
+                        result = match status.as_str() {
+                            "close" => Ok(Some(ClientMessage::ClientDisconnect)),
+                            "ok" => Ok(Some(ClientMessage::StatusOk)),
+                            _ => {
+                                let mes = format!("Invalid status from client: {}!", status);
+                                error!("{}", mes);
+                                Err(io::Error::new(io::ErrorKind::Other, mes))
+                            }
+                        }
                     }
                     ServerIncoming::Commit {
                         topic,

@@ -75,9 +75,7 @@ pub enum ClientMessage {
         client_name: String,
         group_id: String,
     },
-    IncomingStatus {
-        status: String,
-    },
+    ClientDisconnect,
     Commit {
         topic: String,
         partition: u64,
