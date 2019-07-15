@@ -1,8 +1,8 @@
 use bytes::{Bytes, BytesMut};
-use std::io;
+use std::{fmt, io};
 
 /// Type of a message.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum MessageType {
     /// Normal message.
     Message,
@@ -19,11 +19,12 @@ pub struct Message {
     pub message_type: MessageType,
     /// Topic of the message.
     pub topic: String,
-    // XXX add partition or use TopicPartition.
+    /// Partition of the message.
+    pub partition: u64,
     /// Size of the payload in bytes.
     pub payload_size: usize,
     /// SHA-1 of the message payload.
-    pub checksum: String,
+    pub crc: u32,
     /// Message sequence number.
     pub sequence: u64,
     /// Raw bytes of the payload.
@@ -31,8 +32,8 @@ pub struct Message {
 }
 
 /// When a client subscribes this represents then selected start option.
-#[derive(Clone)]
-pub enum TopicStart {
+#[derive(Copy, Clone)]
+pub enum TopicPosition {
     /// Send client all data for a topic.
     Earliest,
     /// Only send data recieved after subscribing.
@@ -40,7 +41,36 @@ pub enum TopicStart {
     /// Use the recorded offset for the client's group id to send any newer messages.
     Current,
     /// Start sending from offset.
-    Offset { offset: usize },
+    Offset { offset: u64 },
+}
+
+impl fmt::Display for TopicPosition {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            TopicPosition::Earliest => write!(f, "Earliest"),
+            TopicPosition::Latest => write!(f, "Latest"),
+            TopicPosition::Current => write!(f, "Current"),
+            TopicPosition::Offset { offset } => write!(f, "Offset({})", offset),
+        }
+    }
+}
+
+/// When subscribing indicate whether to stream messages as they come in or require the client to fetch them.
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub enum SubType {
+    /// Messages will be sent to client when available.
+    Stream,
+    /// Messages will be sent to client when the client requests them.
+    Fetch,
+}
+
+impl fmt::Display for SubType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            SubType::Stream => write!(f, "Stream"),
+            SubType::Fetch => write!(f, "Fetch"),
+        }
+    }
 }
 
 /// This is the internal representation of data coming or going from a client.
@@ -89,10 +119,22 @@ pub enum ClientMessage {
     },
     Subscribe {
         topic: String,
-        position: TopicStart,
+        partition: u64,
+        position: TopicPosition,
+        sub_type: SubType,
     },
     Unsubscribe {
         topic: String,
+        partition: u64,
+    },
+    Fetch {
+        topic: String,
+        partition: u64,
+        position: TopicPosition,
+    },
+    MessagesAvailable {
+        topic: String,
+        partition: u64,
     },
     Noop,
 }

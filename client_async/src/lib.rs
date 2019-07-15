@@ -8,6 +8,7 @@ use std::io;
 use bytes::{BufMut, BytesMut};
 use futures::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 
+use crc::{crc32, Hasher32};
 use log::error;
 use romio::TcpStream;
 
@@ -113,12 +114,37 @@ impl Client {
         Ok(())
     }
 
-    pub async fn subscribe(&mut self, topic: String, position: TopicStart) -> io::Result<()> {
+    pub async fn subscribe(
+        &mut self,
+        topic: &str,
+        position: TopicPosition,
+        sub_type: SubType,
+    ) -> io::Result<()> {
         write_client!(
             self.encoder,
             self.writer,
             self.scratch_bytes,
-            ClientMessage::Subscribe { topic, position }
+            ClientMessage::Subscribe {
+                topic: topic.to_string(),
+                partition: 0,
+                position,
+                sub_type
+            }
+        );
+        Ok(())
+    }
+
+    pub async fn fetch(&mut self, topic: &str, position: TopicPosition) -> io::Result<()> {
+        println!("XXXXX fetch");
+        write_client!(
+            self.encoder,
+            self.writer,
+            self.scratch_bytes,
+            ClientMessage::Fetch {
+                topic: topic.to_string(),
+                partition: 0,
+                position,
+            }
         );
         Ok(())
     }
@@ -129,7 +155,7 @@ impl Client {
 
     pub async fn commit_offset(
         &mut self,
-        topic: String,
+        topic: &str,
         partition: u64,
         commit_offset: u64,
     ) -> io::Result<()> {
@@ -138,7 +164,7 @@ impl Client {
             self.writer,
             self.scratch_bytes,
             ClientMessage::Commit {
-                topic,
+                topic: topic.to_string(),
                 partition,
                 commit_offset
             }
@@ -173,14 +199,18 @@ impl Client {
         Ok(())
     }
 
-    pub async fn publish(&mut self, topic: String, payload: &[u8]) -> io::Result<()> {
+    pub async fn publish(&mut self, topic: &str, partition: u64, payload: &[u8]) -> io::Result<()> {
+        let mut digest = crc32::Digest::new(crc32::IEEE);
+        digest.write(payload);
+        let crc = digest.sum32();
         // XXX check that payload is not to large.
         let packet = ClientMessage::PublishMessage {
             message: Message {
                 message_type: MessageType::Message,
-                topic,
+                topic: topic.to_string(),
+                partition,
                 payload_size: payload.len(),
-                checksum: "".to_string(),
+                crc,
                 sequence: 0,
                 payload: Vec::from(payload),
             },
@@ -257,6 +287,13 @@ impl Client {
                                 println!(
                                     "XXXX got CommitAck, topic: {}, partition: {}, offset: {}",
                                     topic, partition, offset
+                                );
+                                self.decoding = true;
+                            }
+                            Ok(Some(ClientMessage::MessagesAvailable { topic, partition })) => {
+                                println!(
+                                    "XXXX got messages avail, topic: {}, partition: {}",
+                                    topic, partition
                                 );
                                 self.decoding = true;
                             }

@@ -10,23 +10,21 @@ Send a json message with client information as first thing.
     "group_id": "group id of client"
 }}
 ```
-Client name is primarily for informortation while group_id will be used to save
+Client name is primarily for information while group_id will be used to save
 committed offsets.  Server will respond with a status:
 `{"Status": { "status": "OK" }}` or
 `{"Status": { "status": "ERROR", "code": code, "message": "SOME MESSAGE" }}`
 
 ## For pub:
 ### single message publication
-send a json header followed by the payload (we could use a marker byte
-of some sort or just expect the server to count brackets to know when
-the header is finished- that is probably most flexible).
+send a json header followed by the payload.
 header:
 ```
 {"Publish":
 {
 "topic": "TOPIC",
 "payload_size": bytes,
-"checksum": "sha1 of payload bytes"
+"crc": crc32 of payload bytes (unsigned 32 bit)
 }
 }
 PAYLOAD_BYTES
@@ -81,7 +79,8 @@ Client subscribes to topics it wants with subscribe messages:
 {
 "topic": "TOPIC",
 "position": "Earliest | Latest | Current | Offset",
-"offset": offset
+"offset": offset,
+"sub_type": "Stream | Fetch"
 }
 }
 ```
@@ -96,7 +95,7 @@ Then server sends client messages:
 "topic": "TOPIC",
 "sequence": SEQUENCE_NUMBER,
 "payload_size": bytes,
-"checksum": "sha1 of payload bytes"
+"crc": crc of payload bytes (unsigned 32 bit)
 }
 }
 PAYLOAD_BYTES

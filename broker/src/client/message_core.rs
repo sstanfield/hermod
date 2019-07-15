@@ -35,6 +35,7 @@ pub struct MessageCore {
     client_encoder: Box<dyn ProtocolEncoder>,
     writer: WriteHalf<TcpStream>,
     out_bytes: BytesMut,
+    need_fetch: HashMap<TopicPartition, bool>,
 }
 
 impl MessageCore {
@@ -52,6 +53,7 @@ impl MessageCore {
         let group_id: Option<String> = None;
         let buf_size = 1_024_000;
         let out_bytes = BytesMut::with_capacity(buf_size);
+        let need_fetch: HashMap<TopicPartition, bool> = HashMap::new();
         MessageCore {
             broker_tx,
             rx,
@@ -63,6 +65,7 @@ impl MessageCore {
             client_encoder,
             writer,
             out_bytes,
+            need_fetch,
         }
     }
 
@@ -151,23 +154,43 @@ impl MessageCore {
         }
     }
 
-    async fn new_client(&mut self, partition: u64, topic: String, internal: bool) {
+    async fn new_client(
+        &mut self,
+        partition: u64,
+        topic: String,
+        position: TopicPosition,
+        sub_type: SubType,
+        internal: bool,
+    ) {
         let tp = TopicPartition {
             partition,
             topic: topic.clone(),
         };
         if let Ok(mut tx) = self.get_broker_tx(tp).await {
             if let Err(err) = tx
-                .send(BrokerMessage::NewClient(
-                    self.client_name.to_string(),
-                    self.group_id.clone().unwrap(),
-                    self.broker_tx.clone(),
-                    internal,
-                ))
+                .send(BrokerMessage::NewClient {
+                    client_name: self.client_name.to_string(),
+                    group_id: self.group_id.clone().unwrap(),
+                    tx: self.broker_tx.clone(),
+                    is_internal: internal,
+                })
                 .await
             {
                 error!("Error sending message to broker, close client: {}", err);
                 self.running = false;
+            }
+            if sub_type == SubType::Stream {
+                if let Err(err) = tx
+                    .send(BrokerMessage::FetchPolicy {
+                        client_name: self.client_name.to_string(),
+                        sub_type,
+                        position,
+                    })
+                    .await
+                {
+                    error!("Error sending message to broker, close client: {}", err);
+                    self.running = false;
+                }
             }
         } else {
             error!("Error tx for broker, closing client!");
@@ -175,17 +198,24 @@ impl MessageCore {
         }
     }
 
-    async fn commit(&mut self, topic: String, partition: u64, commit_offset: u64) {
-        // XXX should check that the topic/partition are in use by this client.
+    async fn check_connected(&mut self) -> bool {
         if self.group_id.is_none() {
             self.send(ClientMessage::StatusError {
                 code: 503,
-                message: "Client not initialized, closing connection!".to_string(),
+                message: "Client not initialized (connect first), closing connection!".to_string(),
             })
             .await;
             error!("Error client tried to set topics with no group id, closing client.");
             self.running = false;
+            false
         } else {
+            true
+        }
+    }
+
+    async fn commit(&mut self, topic: String, partition: u64, commit_offset: u64) {
+        // XXX should check that the topic/partition are in use by this client.
+        if self.check_connected().await {
             let group_id = self.group_id.clone().unwrap();
             let commit_topic = format!("__consumer_offsets-{}-{}-{}", group_id, topic, partition);
             let tp = TopicPartition {
@@ -197,12 +227,13 @@ impl MessageCore {
                 let message = Message {
                     message_type: MessageType::Message,
                     topic: commit_topic,
+                    partition,
                     payload_size: payload.len(),
-                    checksum: "".to_string(),
+                    crc: 0,
                     sequence: 0,
                     payload,
                 };
-                if let Err(error) = tx.send(BrokerMessage::Message(message)).await {
+                if let Err(error) = tx.send(BrokerMessage::Message { message }).await {
                     error!("Error sending to broker: {}", error);
                     self.running = false;
                 }
@@ -216,29 +247,49 @@ impl MessageCore {
         }
     }
 
-    async fn publish_message(&mut self, message: Message) {
-        let tp = TopicPartition {
-            partition: 0,
-            topic: message.topic.clone(),
-        };
-        let message_type = message.message_type.clone();
-        if message.payload_size > 0 {
+    async fn fetch(&mut self, topic: String, partition: u64, position: TopicPosition) {
+        if self.check_connected().await {
+            let tp = TopicPartition { partition, topic };
             if let Ok(mut tx) = self.get_broker_tx(tp).await {
-                if let Err(error) = tx.send(BrokerMessage::Message(message)).await {
-                    error!("Error sending to broker: {}", error);
+                if let Err(error) = tx
+                    .send(BrokerMessage::Fetch {
+                        client_name: self.client_name.clone(),
+                        position,
+                    })
+                    .await
+                {
+                    error!("Error sending fetch to broker: {}", error);
                     self.running = false;
                 }
             }
         }
-        match message_type {
-            MessageType::Message => {
-                self.send(ClientMessage::StatusOk).await;
+    }
+
+    async fn publish_message(&mut self, message: Message) {
+        if self.check_connected().await {
+            let tp = TopicPartition {
+                partition: 0,
+                topic: message.topic.clone(),
+            };
+            let message_type = message.message_type;
+            if message.payload_size > 0 {
+                if let Ok(mut tx) = self.get_broker_tx(tp).await {
+                    if let Err(error) = tx.send(BrokerMessage::Message { message }).await {
+                        error!("Error sending to broker: {}", error);
+                        self.running = false;
+                    }
+                }
             }
-            MessageType::BatchMessage => {
-                // No feedback during a batch.
-            }
-            MessageType::BatchEnd { count } => {
-                self.send(ClientMessage::StatusOkCount { count }).await;
+            match message_type {
+                MessageType::Message => {
+                    self.send(ClientMessage::StatusOk).await;
+                }
+                MessageType::BatchMessage => {
+                    // No feedback during a batch.
+                }
+                MessageType::BatchEnd { count } => {
+                    self.send(ClientMessage::StatusOkCount { count }).await;
+                }
             }
         }
     }
@@ -286,14 +337,27 @@ impl MessageCore {
                 self.group_id = Some(group_id);
                 self.send(ClientMessage::StatusOk).await;
             }
-            ClientMessage::Subscribe { topic, .. } => {
-                // XXX use position: _ } => {
-                // XXX Validate connection.
-                for topic in self.broker_manager.expand_topics(topic).await {
-                    self.new_client(0, topic, false).await;
-                    self.new_client(0, "__topic_online".to_string(), true).await;
+            ClientMessage::Subscribe {
+                topic,
+                partition,
+                position,
+                sub_type,
+            } => {
+                if self.check_connected().await {
+                    for topic in self.broker_manager.expand_topics(topic).await {
+                        self.new_client(partition, topic, position, sub_type, false)
+                            .await;
+                        self.new_client(
+                            partition,
+                            "__topic_online".to_string(),
+                            TopicPosition::Latest,
+                            SubType::Stream,
+                            true,
+                        )
+                        .await;
+                    }
+                    self.send(ClientMessage::StatusOk).await;
                 }
-                self.send(ClientMessage::StatusOk).await;
             }
             ClientMessage::Unsubscribe { .. } => {
                 // XXX implement... topic: _ } => {
@@ -312,6 +376,29 @@ impl MessageCore {
             }
             ClientMessage::PublishMessage { message } => {
                 self.publish_message(message).await;
+            }
+            ClientMessage::Fetch {
+                topic,
+                partition,
+                position,
+            } => {
+                let tp = TopicPartition {
+                    topic: topic.clone(),
+                    partition,
+                };
+                self.need_fetch.insert(tp, false);
+                self.fetch(topic, partition, position).await;
+            }
+            ClientMessage::MessagesAvailable { topic, partition } => {
+                let tp = TopicPartition {
+                    topic: topic.clone(),
+                    partition,
+                };
+                if !*self.need_fetch.entry(tp.clone()).or_insert(false) {
+                    self.send(ClientMessage::MessagesAvailable { topic, partition })
+                        .await;
+                    self.need_fetch.insert(tp, true);
+                }
             }
             ClientMessage::Noop => {
                 // Like the name says...

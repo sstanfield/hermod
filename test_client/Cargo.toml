@@ -12,6 +12,7 @@ serde_json="1.0"
 serde_derive="1.0"
 log="0.4"
 clap = "2"
+crc = "^1.0.0"
 client_async = { path = "../client_async" }
 common = { path = "../common" }
 

@@ -1,11 +1,11 @@
-use std::{io, str};
+use std::{fmt, io, str};
 
 use bytes::{BufMut, Bytes, BytesMut};
 
 use super::types::*;
 use super::util::*;
 
-use log::{error};
+use log::error;
 
 fn zero_val() -> usize {
     0
@@ -38,6 +38,41 @@ enum TopicStartIn {
     Offset,
 }
 
+impl TopicStartIn {
+    fn to_position(&self, offset: u64) -> TopicPosition {
+        match self {
+            TopicStartIn::Earliest => TopicPosition::Earliest,
+            TopicStartIn::Latest => TopicPosition::Latest,
+            TopicStartIn::Current => TopicPosition::Current,
+            TopicStartIn::Offset => TopicPosition::Offset { offset },
+        }
+    }
+}
+
+#[derive(Deserialize, Clone, Debug)]
+enum SubTypeIn {
+    Stream,
+    Fetch,
+}
+
+impl fmt::Display for SubTypeIn {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            SubTypeIn::Stream => write!(f, "Stream"),
+            SubTypeIn::Fetch => write!(f, "Fetch"),
+        }
+    }
+}
+
+impl SubTypeIn {
+    fn to_subtype(&self) -> SubType {
+        match self {
+            SubTypeIn::Stream => SubType::Stream,
+            SubTypeIn::Fetch => SubType::Fetch,
+        }
+    }
+}
+
 /// This enum represents the valid incoming messages from a client.
 #[derive(Clone, Deserialize)]
 enum ServerIncoming {
@@ -47,12 +82,17 @@ enum ServerIncoming {
     },
     Subscribe {
         topic: String,
+        #[serde(default = "zero_val_u64")]
+        partition: u64,
         position: TopicStartIn,
-        #[serde(default = "zero_val")]
-        offset: usize,
+        #[serde(default = "zero_val_u64")]
+        offset: u64,
+        sub_type: SubTypeIn,
     },
     Unsubscribe {
         topic: String,
+        #[serde(default = "zero_val_u64")]
+        partition: u64,
     },
     Status {
         status: String,
@@ -65,13 +105,23 @@ enum ServerIncoming {
     },
     Publish {
         topic: String,
+        #[serde(default = "zero_val_u64")]
+        partition: u64,
         payload_size: usize,
-        checksum: String,
+        crc: u32,
     },
     Batch {
         batch_type: BatchType,
         #[serde(default = "zero_val")]
         count: usize,
+    },
+    Fetch {
+        topic: String,
+        #[serde(default = "zero_val_u64")]
+        partition: u64,
+        position: TopicStartIn,
+        #[serde(default = "zero_val_u64")]
+        offset: u64,
     },
 }
 
@@ -126,8 +176,9 @@ impl ProtocolDecoder for ServerDecoder {
                 match incoming {
                     ServerIncoming::Publish {
                         topic,
+                        partition,
                         payload_size,
-                        checksum,
+                        crc,
                     } => {
                         let message_type = if self.in_batch {
                             self.batch_count += 1;
@@ -146,8 +197,9 @@ impl ProtocolDecoder for ServerDecoder {
                         let message = Message {
                             message_type,
                             topic,
+                            partition,
                             payload_size,
-                            checksum,
+                            crc,
                             sequence: 0,
                             payload: vec![],
                         };
@@ -166,8 +218,9 @@ impl ProtocolDecoder for ServerDecoder {
                                         count: self.batch_count,
                                     },
                                     topic: "".to_string(),
+                                    partition: 0,
                                     payload_size: 0,
-                                    checksum: "".to_string(),
+                                    crc: 0,
                                     sequence: 0,
                                     payload: vec![],
                                 },
@@ -193,22 +246,21 @@ impl ProtocolDecoder for ServerDecoder {
                     }
                     ServerIncoming::Subscribe {
                         topic,
+                        partition,
                         position,
                         offset,
+                        sub_type,
                     } => {
-                        let new_pos = match position {
-                            TopicStartIn::Earliest => TopicStart::Earliest,
-                            TopicStartIn::Latest => TopicStart::Latest,
-                            TopicStartIn::Current => TopicStart::Current,
-                            TopicStartIn::Offset => TopicStart::Offset { offset },
-                        };
+                        let new_pos = position.to_position(offset);
                         result = Ok(Some(ClientMessage::Subscribe {
                             topic,
+                            partition,
                             position: new_pos,
+                            sub_type: sub_type.to_subtype(),
                         }));
                     }
-                    ServerIncoming::Unsubscribe { topic } => {
-                        result = Ok(Some(ClientMessage::Unsubscribe { topic }));
+                    ServerIncoming::Unsubscribe { topic, partition } => {
+                        result = Ok(Some(ClientMessage::Unsubscribe { topic, partition }));
                     }
                     ServerIncoming::Status { status } => {
                         result = match status.as_str() {
@@ -230,6 +282,19 @@ impl ProtocolDecoder for ServerDecoder {
                             topic,
                             partition,
                             commit_offset,
+                        }));
+                    }
+                    ServerIncoming::Fetch {
+                        topic,
+                        partition,
+                        position,
+                        offset,
+                    } => {
+                        let new_pos = position.to_position(offset);
+                        result = Ok(Some(ClientMessage::Fetch {
+                            topic,
+                            partition,
+                            position: new_pos,
                         }));
                     }
                 }
@@ -262,8 +327,10 @@ enum StatusType {
 enum ClientIncoming {
     Message {
         topic: String,
+        #[serde(default = "zero_val_u64")]
+        partition: u64,
         payload_size: usize,
-        checksum: String,
+        crc: u32,
         sequence: u64,
     },
     Status {
@@ -277,8 +344,14 @@ enum ClientIncoming {
     },
     CommitAck {
         topic: String,
+        #[serde(default = "zero_val_u64")]
         partition: u64,
         offset: u64,
+    },
+    MessagesAvailable {
+        topic: String,
+        #[serde(default = "zero_val_u64")]
+        partition: u64,
     },
 }
 
@@ -305,16 +378,18 @@ impl ProtocolDecoder for ClientDecoder {
                 match incoming {
                     ClientIncoming::Message {
                         topic,
+                        partition,
                         payload_size,
-                        checksum,
+                        crc,
                         sequence,
                     } => {
                         let message_type = MessageType::Message;
                         let message = Message {
                             message_type,
                             topic,
+                            partition,
                             payload_size,
-                            checksum,
+                            crc,
                             sequence,
                             payload: vec![],
                         };
@@ -349,6 +424,9 @@ impl ProtocolDecoder for ClientDecoder {
                             partition,
                             offset,
                         }))
+                    }
+                    ClientIncoming::MessagesAvailable { topic, partition } => {
+                        result = Ok(Some(ClientMessage::MessagesAvailable { topic, partition }))
                     }
                 }
             }
@@ -409,8 +487,8 @@ impl ProtocolEncoder for Encoder {
                 move_bytes(buf, bytes)
             }
             ClientMessage::Message { message } => {
-                let v = format!("{{\"Message\":{{\"topic\":\"{}\",\"payload_size\":{},\"checksum\":\"{}\",\"sequence\":{}}}}}",
-                                   message.topic, message.payload_size, message.checksum, message.sequence);
+                let v = format!("{{\"Message\":{{\"topic\":\"{}\",\"payload_size\":{},\"crc\":{},\"sequence\":{}}}}}",
+                                   message.topic, message.payload_size, message.crc, message.sequence);
                 let bytes = v.as_bytes();
                 if (bytes.len() + message.payload_size) > buf.remaining_mut() {
                     let mut new_bytes = BytesMut::with_capacity(bytes.len() + message.payload_size);
@@ -450,44 +528,34 @@ impl ProtocolEncoder for Encoder {
             }
             ClientMessage::Subscribe {
                 topic,
-                position: TopicStart::Offset { offset },
+                partition,
+                position: TopicPosition::Offset { offset },
+                sub_type,
             } => {
                 let v = format!(
-                    "{{\"Subscribe\": {{\"topic\": \"{}\", \"position\": \"Offset\", \"offset\": {}}}}}",
-                    topic, offset
+                    "{{\"Subscribe\": {{\"topic\": \"{}\", \"partition\": {}, \"position\": \"Offset\", \"offset\": {}, \"sub_type\":\"{}\"}}}}",
+                    topic, partition, offset, sub_type
                 );
                 let bytes = v.as_bytes();
                 move_bytes(buf, bytes)
             }
             ClientMessage::Subscribe {
                 topic,
-                position: TopicStart::Earliest,
+                partition,
+                position,
+                sub_type,
             } => {
                 let v = format!(
-                    "{{\"Subscribe\": {{\"topic\": \"{}\", \"position\": \"Earliest\"}}}}",
-                    topic
+                    "{{\"Subscribe\": {{\"topic\": \"{}\", \"partition\": {}, \"position\": \"{}\", \"sub_type\":\"{}\"}}}}",
+                    topic, partition, position, sub_type
                 );
                 let bytes = v.as_bytes();
                 move_bytes(buf, bytes)
             }
-            ClientMessage::Subscribe {
-                topic,
-                position: TopicStart::Latest,
-            } => {
+            ClientMessage::Unsubscribe { topic, partition } => {
                 let v = format!(
-                    "{{\"Subscribe\": {{\"topic\": \"{}\", \"position\": \"Latest\"}}}}",
-                    topic
-                );
-                let bytes = v.as_bytes();
-                move_bytes(buf, bytes)
-            }
-            ClientMessage::Subscribe {
-                topic,
-                position: TopicStart::Current,
-            } => {
-                let v = format!(
-                    "{{\"Subscribe\": {{\"topic\": \"{}\", \"position\": \"Current\"}}}}",
-                    topic
+                    "{{\"Unsubscribe\": {{\"topic\": \"{}\", \"partition\": {}}}}}",
+                    topic, partition
                 );
                 let bytes = v.as_bytes();
                 move_bytes(buf, bytes)
@@ -502,8 +570,8 @@ impl ProtocolEncoder for Encoder {
             }
             ClientMessage::PublishMessage { message } => {
                 let v = format!(
-                    "{{\"Publish\": {{\"topic\": \"{}\", \"payload_size\": {}, \"checksum\": \"\"}}}}",
-                    message.topic, message.payload_size
+                    "{{\"Publish\": {{\"topic\": \"{}\", \"partition\": {}, \"payload_size\": {}, \"crc\": {}}}}}",
+                    message.topic, message.partition, message.payload_size, message.crc
                 );
                 let bytes = v.as_bytes();
                 if (bytes.len() + message.payload_size) > buf.remaining_mut() {
@@ -517,7 +585,43 @@ impl ProtocolEncoder for Encoder {
                     EncodeStatus::Ok
                 }
             }
-            _ => EncodeStatus::Invalid,
+            ClientMessage::MessagesAvailable { topic, partition } => {
+                let v = format!(
+                    "{{\"MessagesAvailable\": {{\"topic\": \"{}\", \"partition\": {}}}}}",
+                    topic, partition
+                );
+                let bytes = v.as_bytes();
+                move_bytes(buf, bytes)
+            }
+            ClientMessage::Fetch {
+                topic,
+                partition,
+                position: TopicPosition::Offset { offset },
+            } => {
+                let v = format!(
+                    "{{\"Fetch\": {{\"topic\": \"{}\", \"partition\": {}, \"position\": \"Offset\", \"offset\": {}}}}}",
+                    topic, partition, offset
+                );
+                let bytes = v.as_bytes();
+                move_bytes(buf, bytes)
+            }
+            ClientMessage::Fetch {
+                topic,
+                partition,
+                position,
+            } => {
+                let v = format!(
+                    "{{\"Fetch\": {{\"topic\": \"{}\", \"partition\": {}, \"position\": \"{}\"}}}}",
+                    topic, partition, position
+                );
+                let bytes = v.as_bytes();
+                move_bytes(buf, bytes)
+            }
+            ClientMessage::InternalMessage { .. } => EncodeStatus::Invalid,
+            ClientMessage::MessageBatch { .. } => EncodeStatus::Invalid,
+            ClientMessage::Over => EncodeStatus::Invalid,
+            ClientMessage::ClientDisconnect => EncodeStatus::Invalid,
+            ClientMessage::Noop => EncodeStatus::Invalid,
         }
     }
 }

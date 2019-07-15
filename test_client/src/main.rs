@@ -72,8 +72,9 @@ fn main() -> io::Result<()> {
         .unwrap();
         if is_client {
             client
-                .subscribe("top1".to_string(), TopicStart::Current)
+                .subscribe(&topic, TopicPosition::Current, SubType::Fetch)
                 .await?;
+            client.fetch(&topic, TopicPosition::Current).await?;
             loop {
                 match client.next_message().await {
                     Ok(message) => {
@@ -83,7 +84,7 @@ fn main() -> io::Result<()> {
                         );
                         if message.sequence % 100 == 0 {
                             client
-                                .commit_offset("top1".to_string(), 0, message.sequence)
+                                .commit_offset("top1", 0, message.sequence)
                                 .await
                                 .unwrap();
                         }
@@ -103,9 +104,7 @@ fn main() -> io::Result<()> {
                 }
                 let payload = format!("{}-{}\n", "sls", n);
                 println!("XXX pub: {}", payload);
-                client
-                    .publish(topic.to_string(), payload.as_bytes())
-                    .await?;
+                client.publish(&topic, 0, payload.as_bytes()).await?;
             }
             client.end_pub_batch().await?;
             loop {
@@ -117,7 +116,7 @@ fn main() -> io::Result<()> {
                         );
                         if message.sequence % 100 == 0 {
                             client
-                                .commit_offset("top1".to_string(), 0, message.sequence)
+                                .commit_offset(&topic, 0, message.sequence)
                                 .await
                                 .unwrap();
                         }

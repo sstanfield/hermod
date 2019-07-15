@@ -14,6 +14,7 @@ use futures::StreamExt;
 use super::msglog::*;
 use common::types::*;
 
+use crc::{crc32, Hasher32};
 use log::{error, info};
 
 use serde_json;
@@ -23,11 +24,36 @@ struct OffsetRecord {
     offset: u64,
 }
 
+struct ClientInfo {
+    tx: mpsc::Sender<ClientMessage>,
+    group_id: String,
+    sub_type: SubType,
+    is_internal: bool,
+}
+
 #[derive(Clone)]
 pub enum BrokerMessage {
-    Message(Message),
-    NewClient(String, String, mpsc::Sender<ClientMessage>, bool),
-    CloseClient(String),
+    Message {
+        message: Message,
+    },
+    NewClient {
+        client_name: String,
+        group_id: String,
+        tx: mpsc::Sender<ClientMessage>,
+        is_internal: bool,
+    },
+    FetchPolicy {
+        client_name: String,
+        sub_type: SubType,
+        position: TopicPosition,
+    },
+    Fetch {
+        client_name: String,
+        position: TopicPosition,
+    },
+    CloseClient {
+        client_name: String,
+    },
 }
 
 struct BrokerData {
@@ -111,17 +137,21 @@ impl BrokerManager {
                 tp.partition, tp.topic
             )
             .into_bytes();
+            let mut digest = crc32::Digest::new(crc32::IEEE);
+            digest.write(&payload);
+            let crc = digest.sum32();
             let message = Message {
                 message_type: MessageType::Message,
                 topic: "__topic_online".to_string(),
+                partition: 0,
                 payload_size: payload.len(),
-                checksum: "".to_string(),
+                crc,
                 sequence: 0,
                 payload,
             };
             if let Err(error) = data
                 .topic_online_tx
-                .send(BrokerMessage::Message(message))
+                .send(BrokerMessage::Message { message })
                 .await
             {
                 error!("Error sending to broker: {}", error);
@@ -130,6 +160,86 @@ impl BrokerManager {
             Ok(tx.clone())
         }
     }
+}
+
+async fn fetch(
+    offset: u64,
+    msg_log: &MessageLog,
+    client_tx: &mut mpsc::Sender<ClientMessage>,
+    client_name: &str,
+) -> bool {
+    let mut success = true;
+    let info = msg_log.get_index(offset);
+    if info.is_ok() {
+        let info = info.unwrap();
+        if let Err(error) = client_tx
+            .send(ClientMessage::MessageBatch {
+                file_name: msg_log.log_file_name(),
+                start: info.position,
+                length: msg_log.log_file_end() - info.position,
+            })
+            .await
+        {
+            success = false;
+            error!(
+                "Error fetching ({}) for client {}, dropping: {}",
+                offset, client_name, error
+            );
+        }
+    }
+    success
+}
+
+async fn fetch_with_pos(
+    tp: &TopicPartition,
+    msg_log: &MessageLog,
+    client: &mut ClientInfo,
+    client_name: &str,
+    position: TopicPosition,
+) -> bool {
+    let mut bad_client = false;
+    match position {
+        TopicPosition::Earliest => {
+            bad_client = !fetch(0, &msg_log, &mut client.tx, &client_name).await;
+        }
+        TopicPosition::Latest => {}
+        TopicPosition::Current => {
+            let commit_topic = format!(
+                "__consumer_offsets-{}-{}-{}",
+                client.group_id, tp.topic, tp.partition
+            );
+            let tp_offset = TopicPartition {
+                topic: commit_topic,
+                partition: tp.partition,
+            };
+            let offset_log = MessageLog::new(&tp_offset, true);
+            if offset_log.is_ok() {
+                let mut offset_log = offset_log.unwrap();
+                let offset_message = offset_log.get_message(0);
+                if offset_message.is_ok() {
+                    let offset_message = offset_message.unwrap();
+                    let record: OffsetRecord =
+                        serde_json::from_slice(&offset_message.payload[..]).unwrap(); // XXX TODO Don't unwrap...
+                    bad_client =
+                        !fetch(record.offset + 1, &msg_log, &mut client.tx, &client_name).await;
+                } else {
+                    error!(
+                        "Error retrieving consumer offset: {}",
+                        offset_message.unwrap_err()
+                    );
+                }
+            } else {
+                error!(
+                    "Error retrieving consumer offset log: {}",
+                    offset_log.unwrap_err()
+                );
+            }
+        }
+        TopicPosition::Offset { offset } => {
+            bad_client = !fetch(offset, &msg_log, &mut client.tx, &client_name).await;
+        }
+    }
+    bad_client
 }
 
 async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPartition) {
@@ -144,16 +254,12 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
         return;
     }
     let mut msg_log = msg_log.unwrap();
-    struct ClientInfo {
-        tx: mpsc::Sender<ClientMessage>,
-        is_internal: bool,
-    }
     let mut client_tx: HashMap<String, ClientInfo> = HashMap::new();
     let mut message = rx.next().await;
     while message.is_some() {
         let mes = message.clone().unwrap();
         match mes {
-            BrokerMessage::Message(mut message) => {
+            BrokerMessage::Message { mut message } => {
                 message.sequence = msg_log.offset();
 
                 if let Err(error) = msg_log.append(&message) {
@@ -171,8 +277,14 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                             message: message.clone(),
                         }
                     } else {
-                        ClientMessage::Message {
-                            message: message.clone(),
+                        match client.sub_type {
+                            SubType::Stream => ClientMessage::Message {
+                                message: message.clone(),
+                            },
+                            SubType::Fetch => ClientMessage::MessagesAvailable {
+                                topic: tp.topic.clone(),
+                                partition: tp.partition,
+                            },
                         }
                     };
                     if let Err(err) = tx.send(message).await {
@@ -184,62 +296,51 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                     client_tx.remove(&bad_client);
                 }
             }
-            BrokerMessage::NewClient(client_name, group_id, mut tx, is_internal) => {
-                let commit_topic = format!(
-                    "__consumer_offsets-{}-{}-{}",
-                    group_id, tp.topic, tp.partition
+            BrokerMessage::NewClient {
+                client_name,
+                group_id,
+                tx,
+                is_internal,
+            } => {
+                client_tx.insert(
+                    client_name.to_string(),
+                    ClientInfo {
+                        tx: tx.clone(),
+                        group_id,
+                        sub_type: SubType::Fetch,
+                        is_internal,
+                    },
                 );
-                let tp_offset = TopicPartition {
-                    topic: commit_topic,
-                    partition: tp.partition,
-                };
-                let offset_log = MessageLog::new(&tp_offset, true);
-                let mut bad_client = false;
-                if offset_log.is_ok() {
-                    let mut offset_log = offset_log.unwrap();
-                    let offset_message = offset_log.get_message(0);
-                    if offset_message.is_ok() {
-                        let offset_message = offset_message.unwrap();
-                        let record: OffsetRecord =
-                            serde_json::from_slice(&offset_message.payload[..]).unwrap(); // XXX TODO Don't unwrap...
-                        let info = msg_log.get_index(record.offset + 1);
-                        if info.is_ok() {
-                            let info = info.unwrap();
-                            if let Err(error) = tx
-                                .send(ClientMessage::MessageBatch {
-                                    file_name: msg_log.log_file_name(),
-                                    start: info.position,
-                                    length: msg_log.log_file_end() - info.position,
-                                })
-                                .await
-                            {
-                                bad_client = true;
-                                error!("Error sending to new client, dropping: {}", error);
-                            }
+            }
+            BrokerMessage::FetchPolicy {
+                client_name,
+                sub_type,
+                position,
+            } => {
+                if let Some(mut client) = client_tx.get_mut(&client_name) {
+                    client.sub_type = sub_type;
+                    if sub_type == SubType::Stream {
+                        let bad_client =
+                            fetch_with_pos(&tp, &msg_log, client, &client_name, position).await;
+                        if bad_client {
+                            client_tx.remove(&client_name);
                         }
-                    } else {
-                        error!(
-                            "Error retrieving consumer offset: {}",
-                            offset_message.unwrap_err()
-                        );
                     }
-                } else {
-                    error!(
-                        "Error retrieving consumer offset log: {}",
-                        offset_log.unwrap_err()
-                    );
-                }
-                if !bad_client {
-                    client_tx.insert(
-                        client_name.to_string(),
-                        ClientInfo {
-                            tx: tx.clone(),
-                            is_internal,
-                        },
-                    );
                 }
             }
-            BrokerMessage::CloseClient(client_name) => {
+            BrokerMessage::Fetch {
+                client_name,
+                position,
+            } => {
+                if let Some(client) = client_tx.get_mut(&client_name) {
+                    let bad_client =
+                        fetch_with_pos(&tp, &msg_log, client, &client_name, position).await;
+                    if bad_client {
+                        client_tx.remove(&client_name);
+                    }
+                }
+            }
+            BrokerMessage::CloseClient { client_name } => {
                 client_tx.remove(&client_name);
             }
         };

@@ -49,7 +49,7 @@ enum MessageFromLog {
     Message {
         topic: String,
         payload_size: usize,
-        checksum: String,
+        crc: u32,
         sequence: u64,
     },
 }
@@ -64,6 +64,7 @@ pub struct MessageLog {
     idx_end: u64,
     offset: u64,
     single_record: bool,
+    partition: u64,
 }
 
 impl MessageLog {
@@ -109,13 +110,14 @@ impl MessageLog {
             idx_end,
             offset,
             single_record,
+            partition: tp.partition,
         })
     }
 
     pub fn append(&mut self, message: &Message) -> io::Result<()> {
         let v = format!(
-            "{{\"Message\":{{\"topic\":\"{}\",\"payload_size\":{},\"checksum\":\"{}\",\"sequence\":{}}}}}",
-            message.topic, message.payload_size, message.checksum, message.sequence
+            "{{\"Message\":{{\"topic\":\"{}\",\"payload_size\":{},\"crc\":{},\"sequence\":{}}}}}",
+            message.topic, message.payload_size, message.crc, message.sequence
         );
         if self.single_record {
             // XXX need to truncate here?  Probably does not matter.
@@ -193,7 +195,7 @@ impl MessageLog {
                 MessageFromLog::Message {
                     topic,
                     payload_size,
-                    checksum,
+                    crc,
                     sequence,
                 } => {
                     let len = buf.len();
@@ -201,8 +203,9 @@ impl MessageLog {
                     Ok(Message {
                         message_type: MessageType::Message,
                         topic,
+                        partition: self.partition,
                         payload_size,
-                        checksum,
+                        crc,
                         sequence,
                         payload,
                     })
