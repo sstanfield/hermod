@@ -41,6 +41,7 @@ pub struct Client {
     batch_count: u32,
     client_name: String,
     group_id: String,
+    last_offset: u64,
 }
 
 impl Client {
@@ -89,6 +90,7 @@ impl Client {
             batch_count: 0,
             client_name,
             group_id,
+            last_offset: 0,
         })
     }
 
@@ -265,6 +267,7 @@ impl Client {
                         match self.codec.decode(&mut self.in_bytes) {
                             Ok(Some(ClientMessage::Message { message })) => {
                                 self.decoding = true;
+                                self.last_offset = message.sequence;
                                 return Ok(message);
                             }
                             Ok(Some(ClientMessage::StatusOk)) => {
@@ -295,6 +298,9 @@ impl Client {
                                     "XXXX got messages avail, topic: {}, partition: {}",
                                     topic, partition
                                 );
+                                if let Err(err) = self.fetch(&topic, TopicPosition::Offset{offset: self.last_offset}).await {
+                                    error!("Error fetching new messages: {}", err);
+                                }
                                 self.decoding = true;
                             }
                             Ok(Some(_)) => {
