@@ -1,13 +1,13 @@
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::fs::create_dir_all;
 use std::io;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::io::Write;
 
-//use log::{error, info};
-use log::error;
+use log::{error, info};
 
 use serde_json;
 
@@ -69,6 +69,9 @@ pub struct MessageLog {
 
 impl MessageLog {
     pub fn new(tp: &TopicPartition, single_record: bool) -> io::Result<MessageLog> {
+        if let Err(err) = create_dir_all("logs/") {
+            info!("Unable to create log directory: {}", err);
+        }
         let log_file_name = format!("logs/{}.{}.log", tp.topic, tp.partition);
         let mut log_append = OpenOptions::new()
             .read(false)
