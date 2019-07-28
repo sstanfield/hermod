@@ -298,7 +298,15 @@ impl Client {
                                     "XXXX got messages avail, topic: {}, partition: {}",
                                     topic, partition
                                 );
-                                if let Err(err) = self.fetch(&topic, TopicPosition::Offset{offset: self.last_offset}).await {
+                                if let Err(err) = self
+                                    .fetch(
+                                        &topic,
+                                        TopicPosition::Offset {
+                                            offset: self.last_offset,
+                                        },
+                                    )
+                                    .await
+                                {
                                     error!("Error fetching new messages: {}", err);
                                 }
                                 self.decoding = true;
