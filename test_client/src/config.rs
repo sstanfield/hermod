@@ -8,14 +8,30 @@ pub struct Config {
     pub is_client: bool,
 }
 
-fn help(name: &str) {
-    println!("Usage: {} [OPTION]...", name);
-    println!("Run a test client.");
-    println!("  -n, --name [CLIENT NAME]  Sets the name the client will present to the server.");
-    println!("  -g, --group [GROUP NAME]  Sets the consumer group name for the client.");
-    println!("  -c, --client              Run as a client.");
-    println!("  -s, --server              Run as a server.");
-    println!("  -t, --topic [TOPIC]       Sets the topic to use.");
+const VERSION_STRING: &str = env!("VERSION_STRING");
+
+const HELP: &str = r#"test_client - Hermod test client
+Run a test client, either publisher or subscriber.
+
+USAGE:
+    test_client [FLAGS] [OPTIONS]
+
+FLAGS:
+    -p, --publish  Publish messages to broker
+    -c, --consume  Subscribe to topic
+    -v, --version  Print the version, platform and revision of client then exit
+
+OPTIONS:
+    -n, --name <client_name>  Sets the name the client will present to the server.
+    -g, --group <group_id>    Sets the consumer group name for the client.
+    -t, --topic <topic>       Sets the topic to use."#;
+
+fn help(_name: &str) {
+    println!("{}", HELP);
+}
+
+fn version() {
+    println!("{}", VERSION_STRING);
 }
 
 fn get_arg(exe_name: &str, args: &mut Vec<OsString>) -> Result<String, ()> {
@@ -33,11 +49,6 @@ pub fn get_config() -> Result<Config, ()> {
     let mut group = "g1".to_string();
     let mut topic = "top1".to_string();
 
-    if let Some(name_os) = env::var_os("HERMOD_CLIENT_NAME") {
-        if let Ok(n) = name_os.into_string() {
-            name = n;
-        }
-    }
     if let Some(name_os) = env::var_os("HERMOD_CLIENT_NAME") {
         if let Ok(n) = name_os.into_string() {
             name = n;
@@ -68,14 +79,18 @@ pub fn get_config() -> Result<Config, ()> {
                     "-g" | "--group" => {
                         group = get_arg(&exe_name, &mut args)?;
                     }
-                    "-c" | "--client" => {
+                    "-c" | "--consume" => {
                         is_client = true;
                     }
-                    "-s" | "--server" => {
+                    "-p" | "--publish" => {
                         is_client = false;
                     }
                     "-t" | "--topic" => {
                         topic = get_arg(&exe_name, &mut args)?;
+                    }
+                    "-v" | "--version" => {
+                        version();
+                        return Err(());
                     }
                     "-h" | "--help" => {
                         help(&exe_name);
