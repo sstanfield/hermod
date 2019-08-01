@@ -3,6 +3,7 @@ name = "client_async"
 version = "0.1.0"
 authors = ["Steven Stanfield <stanfield@scarecrowtech.com>"]
 edition = "2018"
+build = "build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -19,3 +20,6 @@ common = { path = "../common" }
 [dependencies.futures]
 version = "0.3.0-alpha.17"
 package = "futures-preview"
+
+[build-dependencies]
+chrono = "0.4.7"

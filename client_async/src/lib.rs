@@ -4,6 +4,7 @@
 #![allow(clippy::needless_lifetimes)]
 
 use std::io;
+use std::net::SocketAddr;
 
 use bytes::{BufMut, BytesMut};
 use futures::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
@@ -13,6 +14,8 @@ use log::error;
 use romio::TcpStream;
 
 use common::types::*;
+
+pub const HERMOD_API_VERSION: &str = env!("VERSION_STRING");
 
 macro_rules! write_client {
     ($encoder:expr, $writer:expr, $buf:expr, $mes:expr) => {
@@ -25,8 +28,7 @@ macro_rules! write_client {
 }
 
 pub struct Client {
-    host: String,
-    port: u32,
+    remote: SocketAddr,
     reader: ReadHalf<TcpStream>,
     writer: WriteHalf<TcpStream>,
     codec: Box<dyn ProtocolDecoder>,
@@ -46,8 +48,7 @@ pub struct Client {
 
 impl Client {
     pub async fn connect(
-        host: String,
-        port: u32,
+        remote: SocketAddr,
         client_name: String,
         group_id: String,
         decoder_factory: ProtocolDecoderFactory,
@@ -61,8 +62,7 @@ impl Client {
         let out_bytes = BytesMut::with_capacity(buf_size);
         let mut scratch_bytes = BytesMut::with_capacity(4096);
         let leftover_bytes = 0;
-        let remote = format!("{}:{}", host, port);
-        let stream = TcpStream::connect(&remote.parse().unwrap()).await?;
+        let stream = TcpStream::connect(&remote).await?;
         let (reader, mut writer) = stream.split();
         write_client!(
             encoder,
@@ -74,8 +74,7 @@ impl Client {
             }
         );
         Ok(Client {
-            host,
-            port,
+            remote,
             reader,
             writer,
             codec,
@@ -99,8 +98,7 @@ impl Client {
         self.out_bytes.truncate(0);
         self.scratch_bytes.truncate(0);
         self.leftover_bytes = 0;
-        let remote = format!("{}:{}", self.host, self.port);
-        let stream = TcpStream::connect(&remote.parse().unwrap()).await?;
+        let stream = TcpStream::connect(&self.remote).await?;
         let (reader, writer) = stream.split();
         self.reader = reader;
         self.writer = writer;

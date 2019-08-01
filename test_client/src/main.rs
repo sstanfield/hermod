@@ -46,8 +46,7 @@ fn main() -> io::Result<()> {
 
         executor::block_on(async {
             let mut client = Client::connect(
-                "127.0.0.1".to_string(),
-                7878,
+                config.remote,
                 config.name,
                 config.group,
                 client_decoder_factory,

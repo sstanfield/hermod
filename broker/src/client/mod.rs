@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use futures::channel::mpsc;
@@ -11,7 +12,7 @@ use romio::{TcpListener, TcpStream};
 use super::broker::*;
 use common::types::*;
 
-use log::info;
+use log::{error, info};
 
 pub mod read_input;
 use crate::read_input::*;
@@ -23,26 +24,32 @@ pub async fn start_client(
     broker_manager: Arc<BrokerManager>,
     decoder_factory: ProtocolDecoderFactory,
     encoder_factory: ProtocolEncoderFactory,
+    bind_addr: SocketAddr,
 ) {
-    let mut listener = TcpListener::bind(&"127.0.0.1:7878".parse().unwrap())
-        .expect("Unable to bind to 127.0.0.1:7878");
-    let mut incoming = listener.incoming();
+    match TcpListener::bind(&bind_addr) {
+        Ok(mut listener) => {
+            let mut incoming = listener.incoming();
 
-    info!("Client listening on 127.0.0.1:7878");
-    let mut connections = 0;
+            info!("Client listening on {}", bind_addr);
+            let mut connections = 0;
 
-    while let Some(stream) = incoming.next().await {
-        threadpool
-            .spawn(new_client(
-                stream.unwrap(),
-                connections,
-                broker_manager.clone(),
-                threadpool.clone(),
-                decoder_factory,
-                encoder_factory,
-            ))
-            .unwrap();
-        connections += 1;
+            while let Some(stream) = incoming.next().await {
+                threadpool
+                    .spawn(new_client(
+                        stream.unwrap(),
+                        connections,
+                        broker_manager.clone(),
+                        threadpool.clone(),
+                        decoder_factory,
+                        encoder_factory,
+                    ))
+                    .unwrap();
+                connections += 1;
+            }
+        }
+        Err(err) => {
+            error!("Unable to bind to address {}, {}", bind_addr, err);
+        }
     }
 }
 

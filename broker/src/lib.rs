@@ -3,6 +3,9 @@
 #[macro_use]
 extern crate serde_derive;
 
+pub mod config;
+pub use crate::config::*;
+
 pub mod client;
 pub use crate::client::*;
 

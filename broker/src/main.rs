@@ -40,21 +40,24 @@ fn main() -> io::Result<()> {
         .map(|()| log::set_max_level(LevelFilter::Info))
         .unwrap();
 
-    let mut threadpool = ThreadPoolBuilder::new()
-        .name_prefix("hermod Pool")
-        .create()?;
+    if let Ok(config) = get_config() {
+        let mut threadpool = ThreadPoolBuilder::new()
+            .name_prefix("hermod Pool")
+            .create()?;
 
-    let broker_manager = Arc::new(BrokerManager::new(threadpool.clone()));
+        let broker_manager = Arc::new(BrokerManager::new(threadpool.clone()));
 
-    /*threadpool.run(join(
-        start_pub_empty(threadpool.clone(), broker_manager.clone()),
-        start_sub_empty(threadpool.clone(), io_pool.clone(), broker_manager.clone()),
-    ));*/
-    threadpool.run(start_client(
-        threadpool.clone(),
-        broker_manager,
-        decoder_factory,
-        encoder_factory,
-    ));
+        /*threadpool.run(join(
+            start_pub_empty(threadpool.clone(), broker_manager.clone()),
+            start_sub_empty(threadpool.clone(), io_pool.clone(), broker_manager.clone()),
+        ));*/
+        threadpool.run(start_client(
+            threadpool.clone(),
+            broker_manager,
+            decoder_factory,
+            encoder_factory,
+            config.bind,
+        ));
+    }
     Ok(())
 }

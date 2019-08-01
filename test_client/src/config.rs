@@ -1,11 +1,13 @@
 use std::env;
 use std::ffi::OsString;
+use std::net::SocketAddr;
 
 pub struct Config {
     pub name: String,
     pub group: String,
     pub topic: String,
     pub is_client: bool,
+    pub remote: SocketAddr,
 }
 
 const VERSION_STRING: &str = env!("VERSION_STRING");
@@ -22,9 +24,10 @@ FLAGS:
     -v, --version  Print the version, platform and revision of client then exit
 
 OPTIONS:
-    -n, --name <client_name>  Sets the name the client will present to the server.
-    -g, --group <group_id>    Sets the consumer group name for the client.
-    -t, --topic <topic>       Sets the topic to use."#;
+    -r, --remote <hermod server>  Sets the remote hermod server (server:port).
+    -n, --name <client_name>      Sets the name the client will present to the server.
+    -g, --group <group_id>        Sets the consumer group name for the client.
+    -t, --topic <topic>           Sets the topic to use."#;
 
 fn help(_name: &str) {
     println!("{}", HELP);
@@ -48,7 +51,13 @@ pub fn get_config() -> Result<Config, ()> {
     let mut name = "test_client".to_string();
     let mut group = "g1".to_string();
     let mut topic = "top1".to_string();
+    let mut remote: SocketAddr = "127.0.0.1:7878".parse().unwrap();
 
+    if let Some(name_os) = env::var_os("HERMOD_CLIENT_REMOTE") {
+        if let Ok(r) = name_os.into_string() {
+            remote = r.parse().expect("Invalid socket address for server");
+        }
+    }
     if let Some(name_os) = env::var_os("HERMOD_CLIENT_NAME") {
         if let Ok(n) = name_os.into_string() {
             name = n;
@@ -73,6 +82,14 @@ pub fn get_config() -> Result<Config, ()> {
         if let Some(argument) = args.pop() {
             if let Ok(arg) = argument.into_string() {
                 match &arg[..] {
+                    "-r" | "--remote" => match get_arg(&exe_name, &mut args)?.parse() {
+                        Ok(r) => remote = r,
+                        Err(err) => {
+                            println!("Invalid server socket, {}!", err);
+                            help(&exe_name);
+                            return Err(());
+                        }
+                    },
                     "-n" | "--name" => {
                         name = get_arg(&exe_name, &mut args)?;
                     }
@@ -112,5 +129,6 @@ pub fn get_config() -> Result<Config, ()> {
         group,
         topic,
         is_client,
+        remote,
     })
 }
