@@ -1,9 +1,11 @@
 use std::env;
 use std::ffi::OsString;
+use std::fs::create_dir_all;
 use std::net::SocketAddr;
 
 pub struct Config {
     pub bind: SocketAddr,
+    pub log_dir: String,
 }
 
 const VERSION_STRING: &str = env!("VERSION_STRING");
@@ -19,7 +21,8 @@ FLAGS:
     -h, --help     Print help (this) and exit.
 
 OPTIONS:
-    -b, --bind <bind address>  Sets the hermod server ip and port (ip:port)."#;
+    -l, --logdir, HERMOD_LOGDIR <log file directory>  Sets the directory that will contain log files.
+    -b, --bind, HERMOD_BIND <bind address>            Sets the hermod server ip and port (ip:port)."#;
 
 fn help(_name: &str) {
     println!("{}", HELP);
@@ -41,10 +44,17 @@ fn get_arg(exe_name: &str, args: &mut Vec<OsString>) -> Result<String, ()> {
 
 pub fn get_config() -> Result<Config, ()> {
     let mut bind: SocketAddr = "127.0.0.1:7878".parse().unwrap();
+    let mut log_dir = "logs".to_string();
 
-    if let Some(name_os) = env::var_os("HERMOD_ADDRESS") {
+    if let Some(name_os) = env::var_os("HERMOD_BIND") {
         if let Ok(b) = name_os.into_string() {
             bind = b.parse().expect("Invalid socket address for server");
+        }
+    }
+
+    if let Some(name_os) = env::var_os("HERMOD_LOGDIR") {
+        if let Ok(l) = name_os.into_string() {
+            log_dir = l;
         }
     }
 
@@ -63,7 +73,9 @@ pub fn get_config() -> Result<Config, ()> {
                             return Err(());
                         }
                     },
-
+                    "-l" | "--logdir" => {
+                        log_dir = get_arg(&exe_name, &mut args)?;
+                    }
                     "-v" | "--version" => {
                         version();
                         return Err(());
@@ -83,5 +95,12 @@ pub fn get_config() -> Result<Config, ()> {
             }
         }
     }
-    Ok(Config { bind })
+    if log_dir.ends_with('/') {
+        log_dir = log_dir[..log_dir.len()].to_string();
+    }
+    if let Err(err) = create_dir_all(log_dir.clone()) {
+        println!("Unable to create log directory: {}- {}", log_dir, err);
+        return Err(());
+    }
+    Ok(Config { bind, log_dir })
 }

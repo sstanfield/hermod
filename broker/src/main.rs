@@ -45,7 +45,7 @@ fn main() -> io::Result<()> {
             .name_prefix("hermod Pool")
             .create()?;
 
-        let broker_manager = Arc::new(BrokerManager::new(threadpool.clone()));
+        let broker_manager = Arc::new(BrokerManager::new(threadpool.clone(), &config.log_dir));
 
         /*threadpool.run(join(
             start_pub_empty(threadpool.clone(), broker_manager.clone()),

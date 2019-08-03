@@ -64,17 +64,19 @@ struct BrokerData {
 
 pub struct BrokerManager {
     brokers: Mutex<BrokerData>,
+    log_dir: String,
 }
 
 impl BrokerManager {
-    pub fn new(mut threadpool: ThreadPool) -> BrokerManager {
+    pub fn new(mut threadpool: ThreadPool, log_dir: &str) -> BrokerManager {
+        let log_dir = log_dir.to_string();
         let tp = TopicPartition {
             topic: "__topic_online".to_string(),
             partition: 0,
         };
         let (topic_online_tx, rx) = mpsc::channel::<BrokerMessage>(1000);
         //let (topic_online_tx, rx) = mpsc::unbounded::<BrokerMessage>();
-        if let Err(err) = threadpool.spawn(new_message_broker(rx, tp.clone())) {
+        if let Err(err) = threadpool.spawn(new_message_broker(rx, tp.clone(), log_dir.clone())) {
             error!(
                 "Got error spawning task for partion {}, topic {}, error: {}",
                 tp.partition, tp.topic, err
@@ -88,6 +90,7 @@ impl BrokerManager {
                 threadpool,
                 topic_online_tx,
             }),
+            log_dir,
         }
     }
 
@@ -125,7 +128,10 @@ impl BrokerManager {
         }
         let (tx, rx) = mpsc::channel::<BrokerMessage>(1000);
         data.brokers.insert(tp.clone(), tx.clone());
-        if let Err(err) = data.threadpool.spawn(new_message_broker(rx, tp.clone())) {
+        if let Err(err) =
+            data.threadpool
+                .spawn(new_message_broker(rx, tp.clone(), self.log_dir.clone()))
+        {
             error!(
                 "Got error spawning task for partion {}, topic {}, error: {}",
                 partition, topic, err
@@ -196,6 +202,7 @@ async fn fetch_with_pos(
     client: &mut ClientInfo,
     client_name: &str,
     position: TopicPosition,
+    log_dir: &str,
 ) -> bool {
     let mut bad_client = false;
     match position {
@@ -212,7 +219,7 @@ async fn fetch_with_pos(
                 topic: commit_topic,
                 partition: tp.partition,
             };
-            let offset_log = MessageLog::new(&tp_offset, true);
+            let offset_log = MessageLog::new(&tp_offset, true, log_dir);
             if offset_log.is_ok() {
                 let mut offset_log = offset_log.unwrap();
                 let offset_message = offset_log.get_message(0);
@@ -223,10 +230,11 @@ async fn fetch_with_pos(
                     bad_client =
                         !fetch(record.offset + 1, &msg_log, &mut client.tx, &client_name).await;
                 } else {
-                    error!(
-                        "Error retrieving consumer offset: {}",
+                    info!(
+                        "Issue retrieving consumer offset (probably not committed): {}, using 0.",
                         offset_message.unwrap_err()
                     );
+                    bad_client = !fetch(0, &msg_log, &mut client.tx, &client_name).await;
                 }
             } else {
                 error!(
@@ -242,13 +250,17 @@ async fn fetch_with_pos(
     bad_client
 }
 
-async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPartition) {
+async fn new_message_broker(
+    mut rx: mpsc::Receiver<BrokerMessage>,
+    tp: TopicPartition,
+    log_dir: String,
+) {
     info!(
         "Broker starting for partition {}, topic {}.",
         tp.partition, tp.topic
     );
 
-    let msg_log = MessageLog::new(&tp, tp.topic.starts_with("__consumer_offsets"));
+    let msg_log = MessageLog::new(&tp, tp.topic.starts_with("__consumer_offsets"), &log_dir);
     if let Err(error) = msg_log {
         error!("Failed to open the message log {}", error);
         return;
@@ -321,7 +333,8 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
                     client.sub_type = sub_type;
                     if sub_type == SubType::Stream {
                         let bad_client =
-                            fetch_with_pos(&tp, &msg_log, client, &client_name, position).await;
+                            fetch_with_pos(&tp, &msg_log, client, &client_name, position, &log_dir)
+                                .await;
                         if bad_client {
                             client_tx.remove(&client_name);
                         }
@@ -334,7 +347,8 @@ async fn new_message_broker(mut rx: mpsc::Receiver<BrokerMessage>, tp: TopicPart
             } => {
                 if let Some(client) = client_tx.get_mut(&client_name) {
                     let bad_client =
-                        fetch_with_pos(&tp, &msg_log, client, &client_name, position).await;
+                        fetch_with_pos(&tp, &msg_log, client, &client_name, position, &log_dir)
+                            .await;
                     if bad_client {
                         client_tx.remove(&client_name);
                     }

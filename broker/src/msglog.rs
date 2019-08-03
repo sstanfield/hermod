@@ -1,4 +1,3 @@
-use std::fs::create_dir_all;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
@@ -7,7 +6,7 @@ use std::io::Seek;
 use std::io::SeekFrom;
 use std::io::Write;
 
-use log::{error, info};
+use log::error;
 
 use serde_json;
 
@@ -68,11 +67,8 @@ pub struct MessageLog {
 }
 
 impl MessageLog {
-    pub fn new(tp: &TopicPartition, single_record: bool) -> io::Result<MessageLog> {
-        if let Err(err) = create_dir_all("logs/") {
-            info!("Unable to create log directory: {}", err);
-        }
-        let log_file_name = format!("logs/{}.{}.log", tp.topic, tp.partition);
+    pub fn new(tp: &TopicPartition, single_record: bool, log_dir: &str) -> io::Result<MessageLog> {
+        let log_file_name = format!("{}/{}.{}.log", log_dir, tp.topic, tp.partition);
         let mut log_append = OpenOptions::new()
             .read(false)
             .write(true)
@@ -82,7 +78,7 @@ impl MessageLog {
         log_append.seek(SeekFrom::End(0))?;
         let log_end = log_append.seek(SeekFrom::Current(0))?;
 
-        let log_file_idx_name = format!("logs/{}.{}.idx", tp.topic, tp.partition);
+        let log_file_idx_name = format!("{}/{}.{}.idx", log_dir, tp.topic, tp.partition);
         let mut idx_append = OpenOptions::new()
             .read(false)
             .write(true)
