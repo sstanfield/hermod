@@ -57,8 +57,11 @@ fn main() -> io::Result<()> {
             if config.is_client {
                 client
                     .subscribe(&config.topic, TopicPosition::Current, SubType::Fetch)
+                    //.subscribe(&config.topic, TopicPosition::Current, SubType::Stream)
                     .await?;
-                client.fetch(&config.topic, 0, TopicPosition::Current).await?;
+                client
+                    .fetch(&config.topic, 0, TopicPosition::Current)
+                    .await?;
                 loop {
                     match client.next_message().await {
                         Ok(message) => {

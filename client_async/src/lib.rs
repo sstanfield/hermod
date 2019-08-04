@@ -3,6 +3,7 @@
 // Turn back on when it works...
 #![allow(clippy::needless_lifetimes)]
 
+use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
 
@@ -44,7 +45,8 @@ pub struct Client {
     client_name: String,
     group_id: String,
     last_offset: u64,
-    messages: Vec<ClientMessage>,
+    messages: VecDeque<Message>,
+    do_fetch: Option<TopicPartition>,
 }
 
 impl Client {
@@ -98,6 +100,72 @@ impl Client {
         }
     }
 
+    pub async fn loop_until_status(&mut self, expected_count: Option<usize>) -> io::Result<()> {
+        loop {
+            if let Some(client_message) = self.next_client_message().await? {
+                match client_message {
+                    ClientMessage::Message { message } => {
+                        self.decoding = true;
+                        self.messages.push_back(message);
+                    }
+                    ClientMessage::StatusOk => {
+                        self.decoding = true;
+                        if expected_count.is_none() {
+                            return Ok(());
+                        }
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "Got unexpected StatusOk!",
+                        ));
+                    }
+                    ClientMessage::StatusOkCount { count } => {
+                        self.decoding = true;
+                        if let Some(in_count) = expected_count {
+                            if count == in_count {
+                                return Ok(());
+                            } else {
+                                let mes = format!("Expected count of {} got {}!", in_count, count);
+                                return Err(io::Error::new(io::ErrorKind::Other, mes));
+                            }
+                        }
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "Got unexpected StatusOkCount!",
+                        ));
+                    }
+                    ClientMessage::StatusError { code, message } => {
+                        self.decoding = true;
+                        let mes = format!("Status ERROR {}: {}!", code, message);
+                        return Err(io::Error::new(io::ErrorKind::Other, mes));
+                    }
+                    ClientMessage::CommitAck {
+                        topic,
+                        partition,
+                        offset,
+                    } => {
+                        self.decoding = true;
+                        let mes = format!(
+                            "Unexpected CommitAck ERROR {}/{}: {}!",
+                            topic, partition, offset
+                        );
+                        return Err(io::Error::new(io::ErrorKind::Other, mes));
+                    }
+                    ClientMessage::MessagesAvailable { topic, partition } => {
+                        self.do_fetch = Some(TopicPartition { topic, partition });
+                        self.decoding = true;
+                    }
+                    _ => {
+                        // Should not happen, not a valid client message...
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "Got unexpected message!",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn connect(
         remote: SocketAddr,
         client_name: String,
@@ -141,7 +209,8 @@ impl Client {
             client_name,
             group_id,
             last_offset: 0,
-            messages: Vec::with_capacity(100),
+            messages: VecDeque::with_capacity(100),
+            do_fetch: None,
         };
         match client.next_client_message().await? {
             Some(ClientMessage::StatusOk) => Ok(client),
@@ -196,10 +265,16 @@ impl Client {
                 sub_type
             }
         );
+        self.loop_until_status(None).await?;
         Ok(())
     }
 
-    pub async fn fetch(&mut self, topic: &str, partition: u64, position: TopicPosition) -> io::Result<()> {
+    pub async fn fetch(
+        &mut self,
+        topic: &str,
+        partition: u64,
+        position: TopicPosition,
+    ) -> io::Result<()> {
         write_client!(
             self.encoder,
             self.writer,
@@ -233,7 +308,47 @@ impl Client {
                 commit_offset
             }
         );
-        Ok(())
+        loop {
+            if let Some(client_message) = self.next_client_message().await? {
+                match client_message {
+                    ClientMessage::Message { message } => {
+                        self.decoding = true;
+                        self.messages.push_back(message);
+                    }
+                    ClientMessage::StatusError { code, message } => {
+                        self.decoding = true;
+                        let mes = format!("Status ERROR {}: {}!", code, message);
+                        return Err(io::Error::new(io::ErrorKind::Other, mes));
+                    }
+                    ClientMessage::CommitAck {
+                        topic: t,
+                        partition: p,
+                        offset: o,
+                    } => {
+                        self.decoding = true;
+                        if topic == t && partition == p && commit_offset == o {
+                            return Ok(());
+                        }
+                        let mes = format!(
+                            "CommitAck ERROR {}/{}, {}/{}, {}/{}!",
+                            topic, t, partition, p, commit_offset, o
+                        );
+                        return Err(io::Error::new(io::ErrorKind::Other, mes));
+                    }
+                    ClientMessage::MessagesAvailable { topic, partition } => {
+                        self.do_fetch = Some(TopicPartition { topic, partition });
+                        self.decoding = true;
+                    }
+                    _ => {
+                        // Should not happen, not a valid client message...
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "Got unexpected message!",
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     pub async fn start_pub_batch(&mut self) -> io::Result<()> {
@@ -257,6 +372,8 @@ impl Client {
             );
             self.writer.write_all(&self.out_bytes).await?;
             self.out_bytes.truncate(0);
+            self.loop_until_status(Some(self.batch_count as usize))
+                .await?;
         }
         self.batch_count = 0;
         self.in_publish_batch = false;
@@ -289,17 +406,39 @@ impl Client {
             } else {
                 self.writer.write_all(&bytes).await?;
                 self.out_bytes.truncate(0);
+                self.loop_until_status(Some(self.batch_count as usize))
+                    .await?;
             }
         } else if self.in_publish_batch {
             self.batch_count += 1;
         } else {
             self.writer.write_all(&self.out_bytes).await?;
             self.out_bytes.truncate(0);
+            self.loop_until_status(None).await?;
         }
         Ok(())
     }
 
     pub async fn next_message(&mut self) -> io::Result<Message> {
+        let do_fetch = self.do_fetch.clone();
+        if let Some(TopicPartition { topic, partition }) = do_fetch {
+            if let Err(err) = self
+                .fetch(
+                    &topic,
+                    partition,
+                    TopicPosition::Offset {
+                        offset: self.last_offset,
+                    },
+                )
+                .await
+            {
+                error!("Error fetching new messages: {}", err);
+            }
+            self.do_fetch = None;
+        }
+        if let Some(message) = self.messages.pop_front() {
+            return Ok(message);
+        }
         loop {
             if let Some(client_message) = self.next_client_message().await? {
                 match client_message {
@@ -310,15 +449,34 @@ impl Client {
                     }
                     ClientMessage::StatusOk => {
                         self.decoding = true;
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "Got unexpected StatusOk!",
+                        ));
                     }
                     ClientMessage::StatusOkCount { .. } => {
                         self.decoding = true;
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "Got unexpected StatusOkCount!",
+                        ));
                     }
-                    ClientMessage::StatusError { .. } => {
+                    ClientMessage::StatusError { code, message } => {
                         self.decoding = true;
+                        let mes = format!("Status ERROR {}: {}!", code, message);
+                        return Err(io::Error::new(io::ErrorKind::Other, mes));
                     }
-                    ClientMessage::CommitAck { .. } => {
+                    ClientMessage::CommitAck {
+                        topic,
+                        partition,
+                        offset,
+                    } => {
                         self.decoding = true;
+                        let mes = format!(
+                            "Unexpected CommitAck ERROR {}/{}: {}!",
+                            topic, partition, offset
+                        );
+                        return Err(io::Error::new(io::ErrorKind::Other, mes));
                     }
                     ClientMessage::MessagesAvailable { topic, partition } => {
                         if let Err(err) = self
@@ -337,7 +495,10 @@ impl Client {
                     }
                     _ => {
                         // Should not happen, not a valid client message...
-                        // XXX do something...
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "Got unexpected message!",
+                        ));
                     }
                 }
             }
