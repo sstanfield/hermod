@@ -44,9 +44,60 @@ pub struct Client {
     client_name: String,
     group_id: String,
     last_offset: u64,
+    messages: Vec<ClientMessage>,
 }
 
 impl Client {
+    async fn next_client_message(&mut self) -> io::Result<Option<ClientMessage>> {
+        let input = if self.decoding {
+            Ok(self.in_bytes.len())
+        } else {
+            // Reclaim the entire buffer and copy leftover bytes to front.
+            self.in_bytes.reserve(self.buf_size - self.in_bytes.len());
+            unsafe {
+                self.in_bytes.set_len(self.buf_size);
+            }
+            self.reader
+                .read(&mut self.in_bytes[self.leftover_bytes..])
+                .await
+        };
+        match input {
+            Ok(bytes) => {
+                if bytes == 0 && !self.decoding {
+                    error!("Remote publisher done.");
+                    Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        "Remote broker done, closing!",
+                    ))
+                } else {
+                    self.decoding = false;
+                    self.in_bytes.truncate(self.leftover_bytes + bytes);
+                    self.leftover_bytes = 0;
+                    match self.codec.decode(&mut self.in_bytes) {
+                        Ok(Some(client_message)) => {
+                            self.decoding = true;
+                            Ok(Some(client_message))
+                        }
+                        Ok(None) => {
+                            if !self.in_bytes.is_empty() {
+                                self.leftover_bytes = self.in_bytes.len();
+                            }
+                            Ok(None)
+                        }
+                        Err(error) => {
+                            error!("Decode error: {}", error);
+                            Err(error)
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                error!("Error reading socket: {}", error);
+                Err(error)
+            }
+        }
+    }
+
     pub async fn connect(
         remote: SocketAddr,
         client_name: String,
@@ -73,7 +124,7 @@ impl Client {
                 group_id: group_id.clone()
             }
         );
-        Ok(Client {
+        let mut client = Client {
             remote,
             reader,
             writer,
@@ -90,7 +141,15 @@ impl Client {
             client_name,
             group_id,
             last_offset: 0,
-        })
+            messages: Vec::with_capacity(100),
+        };
+        match client.next_client_message().await? {
+            Some(ClientMessage::StatusOk) => Ok(client),
+            _ => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Did not get OK from server, closing!",
+            )),
+        }
     }
 
     pub async fn reconnect(&mut self) -> io::Result<()> {
@@ -111,7 +170,13 @@ impl Client {
                 group_id: self.group_id.clone()
             }
         );
-        Ok(())
+        match self.next_client_message().await? {
+            Some(ClientMessage::StatusOk) => Ok(()),
+            _ => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Did not get OK from server, closing!",
+            )),
+        }
     }
 
     pub async fn subscribe(
@@ -134,15 +199,14 @@ impl Client {
         Ok(())
     }
 
-    pub async fn fetch(&mut self, topic: &str, position: TopicPosition) -> io::Result<()> {
-        println!("XXXXX fetch");
+    pub async fn fetch(&mut self, topic: &str, partition: u64, position: TopicPosition) -> io::Result<()> {
         write_client!(
             self.encoder,
             self.writer,
             self.scratch_bytes,
             ClientMessage::Fetch {
                 topic: topic.to_string(),
-                partition: 0,
+                partition,
                 position,
             }
         );
@@ -237,97 +301,44 @@ impl Client {
 
     pub async fn next_message(&mut self) -> io::Result<Message> {
         loop {
-            let input = if self.decoding {
-                Ok(self.in_bytes.len())
-            } else {
-                // Reclaim the entire buffer and copy leftover bytes to front.
-                self.in_bytes.reserve(self.buf_size - self.in_bytes.len());
-                unsafe {
-                    self.in_bytes.set_len(self.buf_size);
-                }
-                self.reader
-                    .read(&mut self.in_bytes[self.leftover_bytes..])
-                    .await
-            };
-            match input {
-                Ok(bytes) => {
-                    //println!("XXXX c1: {}", bytes);
-                    if bytes == 0 && !self.decoding {
-                        error!("Remote publisher done.");
-                        return Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            "Remote broker done, closing!",
-                        ));
-                    } else {
-                        self.decoding = false;
-                        self.in_bytes.truncate(self.leftover_bytes + bytes);
-                        self.leftover_bytes = 0;
-                        match self.codec.decode(&mut self.in_bytes) {
-                            Ok(Some(ClientMessage::Message { message })) => {
-                                self.decoding = true;
-                                self.last_offset = message.sequence;
-                                return Ok(message);
-                            }
-                            Ok(Some(ClientMessage::StatusOk)) => {
-                                println!("XXXX got OK status");
-                                self.decoding = true;
-                            }
-                            Ok(Some(ClientMessage::StatusOkCount { count })) => {
-                                println!("XXXX got OK status count: {}", count);
-                                self.decoding = true;
-                            }
-                            Ok(Some(ClientMessage::StatusError { code, message })) => {
-                                println!("XXXX got ERROR, code: {}, message: {}", code, message);
-                                self.decoding = true;
-                            }
-                            Ok(Some(ClientMessage::CommitAck {
-                                topic,
-                                partition,
-                                offset,
-                            })) => {
-                                println!(
-                                    "XXXX got CommitAck, topic: {}, partition: {}, offset: {}",
-                                    topic, partition, offset
-                                );
-                                self.decoding = true;
-                            }
-                            Ok(Some(ClientMessage::MessagesAvailable { topic, partition })) => {
-                                println!(
-                                    "XXXX got messages avail, topic: {}, partition: {}",
-                                    topic, partition
-                                );
-                                if let Err(err) = self
-                                    .fetch(
-                                        &topic,
-                                        TopicPosition::Offset {
-                                            offset: self.last_offset,
-                                        },
-                                    )
-                                    .await
-                                {
-                                    error!("Error fetching new messages: {}", err);
-                                }
-                                self.decoding = true;
-                            }
-                            Ok(Some(_)) => {
-                                // Should not happen, not a valid client message...
-                                // XXX do something...
-                            }
-                            Ok(None) => {
-                                if !self.in_bytes.is_empty() {
-                                    self.leftover_bytes = self.in_bytes.len();
-                                }
-                            }
-                            Err(error) => {
-                                error!("Decode error: {}", error);
-                                return Err(error);
-                            }
-                        }
+            if let Some(client_message) = self.next_client_message().await? {
+                match client_message {
+                    ClientMessage::Message { message } => {
+                        self.decoding = true;
+                        self.last_offset = message.sequence;
+                        return Ok(message);
                     }
-                }
-                Err(error) => {
-                    error!("Error reading socket: {}", error);
-                    return Err(error);
+                    ClientMessage::StatusOk => {
+                        self.decoding = true;
+                    }
+                    ClientMessage::StatusOkCount { .. } => {
+                        self.decoding = true;
+                    }
+                    ClientMessage::StatusError { .. } => {
+                        self.decoding = true;
+                    }
+                    ClientMessage::CommitAck { .. } => {
+                        self.decoding = true;
+                    }
+                    ClientMessage::MessagesAvailable { topic, partition } => {
+                        if let Err(err) = self
+                            .fetch(
+                                &topic,
+                                partition,
+                                TopicPosition::Offset {
+                                    offset: self.last_offset,
+                                },
+                            )
+                            .await
+                        {
+                            error!("Error fetching new messages: {}", err);
+                        }
+                        self.decoding = true;
+                    }
+                    _ => {
+                        // Should not happen, not a valid client message...
+                        // XXX do something...
+                    }
                 }
             }
         }
