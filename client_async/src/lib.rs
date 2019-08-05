@@ -406,8 +406,7 @@ impl Client {
             } else {
                 self.writer.write_all(&bytes).await?;
                 self.out_bytes.truncate(0);
-                self.loop_until_status(Some(self.batch_count as usize))
-                    .await?;
+                self.loop_until_status(None).await?;
             }
         } else if self.in_publish_batch {
             self.batch_count += 1;

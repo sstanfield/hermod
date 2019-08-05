@@ -8,6 +8,8 @@ pub struct Config {
     pub topic: String,
     pub is_client: bool,
     pub remote: SocketAddr,
+    pub count: usize,
+    pub base_message: String,
 }
 
 const VERSION_STRING: &str = env!("VERSION_STRING");
@@ -27,6 +29,8 @@ OPTIONS:
     -r, --remote <hermod server>  Sets the remote hermod server (server:port).
     -n, --name <client_name>      Sets the name the client will present to the server.
     -g, --group <group_id>        Sets the consumer group name for the client.
+        --count <count>           Sets the number of messages to consume or publish.
+        --base_message <str>      Sets the message to append index to for publishing.
     -t, --topic <topic>           Sets the topic to use."#;
 
 fn help(_name: &str) {
@@ -51,6 +55,8 @@ pub fn get_config() -> Result<Config, ()> {
     let mut name = "test_client".to_string();
     let mut group = "g1".to_string();
     let mut topic = "top1".to_string();
+    let mut count = 0;
+    let mut base_message = "SOME MESSAGE".to_string();
     let mut remote: SocketAddr = "127.0.0.1:7878".parse().unwrap();
 
     if let Some(name_os) = env::var_os("HERMOD_CLIENT_REMOTE") {
@@ -96,6 +102,14 @@ pub fn get_config() -> Result<Config, ()> {
                     "-g" | "--group" => {
                         group = get_arg(&exe_name, &mut args)?;
                     }
+                    "--count" => {
+                        count = get_arg(&exe_name, &mut args)?
+                            .parse::<usize>()
+                            .map_err(|_| ())?;
+                    }
+                    "--base_message" => {
+                        base_message = get_arg(&exe_name, &mut args)?;
+                    }
                     "-c" | "--consume" => {
                         is_client = true;
                     }
@@ -130,5 +144,7 @@ pub fn get_config() -> Result<Config, ()> {
         topic,
         is_client,
         remote,
+        count,
+        base_message,
     })
 }

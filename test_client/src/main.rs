@@ -47,7 +47,7 @@ fn main() -> io::Result<()> {
         executor::block_on(async {
             let mut client = Client::connect(
                 config.remote,
-                config.name,
+                config.name.clone(),
                 config.group,
                 client_decoder_factory,
                 encoder_factory,
@@ -62,45 +62,14 @@ fn main() -> io::Result<()> {
                 client
                     .fetch(&config.topic, 0, TopicPosition::Current)
                     .await?;
+                let mut i = 0;
                 loop {
                     match client.next_message().await {
                         Ok(message) => {
-                            println!(
+                            /*println!(
                                 "Message loopy: {}",
                                 String::from_utf8(message.payload).unwrap()
-                            );
-                            if message.sequence % 100 == 0 {
-                                client
-                                    .commit_offset("top1", 0, message.sequence)
-                                    .await
-                                    .unwrap();
-                            }
-                        }
-                        Err(error) => {
-                            error!("Client read error: {}", error);
-                            return Ok(());
-                        }
-                    }
-                }
-            } else {
-                client.start_pub_batch().await?;
-                for n in 0..10000 {
-                    if n > 0 && n % 1000 == 0 {
-                        client.end_pub_batch().await?;
-                        client.start_pub_batch().await?;
-                    }
-                    let payload = format!("{}-{}\n", "sls", n);
-                    println!("XXX pub: {}", payload);
-                    client.publish(&config.topic, 0, payload.as_bytes()).await?;
-                }
-                client.end_pub_batch().await?;
-                loop {
-                    match client.next_message().await {
-                        Ok(message) => {
-                            println!(
-                                "Message loopy: {}",
-                                String::from_utf8(message.payload).unwrap()
-                            );
+                            );*/
                             if message.sequence % 100 == 0 {
                                 client
                                     .commit_offset(&config.topic, 0, message.sequence)
@@ -113,8 +82,25 @@ fn main() -> io::Result<()> {
                             return Ok(());
                         }
                     }
+                    i = i + 1;
+                    if config.count > 0 && i >= config.count {
+                        println!("Consumer {} ending due to reaching count {}.", config.name, config.count);
+                        return Ok(());
+                    }
                 }
-                //           Ok(())
+            } else {
+                client.start_pub_batch().await?;
+                for n in 0..config.count {
+                    if n > 0 && n % 1000 == 0 {
+                        client.end_pub_batch().await?;
+                        client.start_pub_batch().await?;
+                    }
+                    let payload = format!("{}-{}\n", config.base_message, n);
+                    //println!("XXX pub: {}", payload);
+                    client.publish(&config.topic, 0, payload.as_bytes()).await?;
+                }
+                client.end_pub_batch().await?;
+                Ok(())
             }
         })
     } else {
