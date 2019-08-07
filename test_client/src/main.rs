@@ -82,9 +82,12 @@ fn main() -> io::Result<()> {
                             return Ok(());
                         }
                     }
-                    i = i + 1;
+                    i += 1;
                     if config.count > 0 && i >= config.count {
-                        println!("Consumer {} ending due to reaching count {}.", config.name, config.count);
+                        println!(
+                            "Consumer {} ending due to reaching count {}.",
+                            config.name, config.count
+                        );
                         return Ok(());
                     }
                 }
@@ -97,7 +100,10 @@ fn main() -> io::Result<()> {
                     }
                     let payload = format!("{}-{}\n", config.base_message, n);
                     //println!("XXX pub: {}", payload);
-                    client.publish(&config.topic, 0, payload.as_bytes()).await?;
+                    if let Err(err) = client.publish(&config.topic, 0, payload.as_bytes()).await {
+                        println!("Error publishing: {}.", err);
+                        return Err(err);
+                    }
                 }
                 client.end_pub_batch().await?;
                 Ok(())

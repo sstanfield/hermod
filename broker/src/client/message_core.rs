@@ -35,7 +35,6 @@ pub struct MessageCore {
     client_encoder: Box<dyn ProtocolEncoder>,
     writer: WriteHalf<TcpStream>,
     out_bytes: BytesMut,
-    need_fetch: HashMap<TopicPartition, bool>,
 }
 
 impl MessageCore {
@@ -53,7 +52,6 @@ impl MessageCore {
         let group_id: Option<String> = None;
         let buf_size = 1_024_000;
         let out_bytes = BytesMut::with_capacity(buf_size);
-        let need_fetch: HashMap<TopicPartition, bool> = HashMap::new();
         MessageCore {
             broker_tx,
             rx,
@@ -65,7 +63,6 @@ impl MessageCore {
             client_encoder,
             writer,
             out_bytes,
-            need_fetch,
         }
     }
 
@@ -382,23 +379,11 @@ impl MessageCore {
                 partition,
                 position,
             } => {
-                let tp = TopicPartition {
-                    topic: topic.clone(),
-                    partition,
-                };
-                self.need_fetch.insert(tp, false);
                 self.fetch(topic, partition, position).await;
             }
             ClientMessage::MessagesAvailable { topic, partition } => {
-                let tp = TopicPartition {
-                    topic: topic.clone(),
-                    partition,
-                };
-                if !*self.need_fetch.entry(tp.clone()).or_insert(false) {
-                    self.send(ClientMessage::MessagesAvailable { topic, partition })
-                        .await;
-                    self.need_fetch.insert(tp, true);
-                }
+                self.send(ClientMessage::MessagesAvailable { topic, partition })
+                    .await;
             }
             ClientMessage::Noop => {
                 // Like the name says...

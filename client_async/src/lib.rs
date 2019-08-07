@@ -51,7 +51,7 @@ pub struct Client {
 
 impl Client {
     async fn next_client_message(&mut self) -> io::Result<Option<ClientMessage>> {
-        let input = if self.decoding {
+        let input = if self.decoding && !self.in_bytes.is_empty() {
             Ok(self.in_bytes.len())
         } else {
             // Reclaim the entire buffer and copy leftover bytes to front.
@@ -105,11 +105,9 @@ impl Client {
             if let Some(client_message) = self.next_client_message().await? {
                 match client_message {
                     ClientMessage::Message { message } => {
-                        self.decoding = true;
                         self.messages.push_back(message);
                     }
                     ClientMessage::StatusOk => {
-                        self.decoding = true;
                         if expected_count.is_none() {
                             return Ok(());
                         }
@@ -119,7 +117,6 @@ impl Client {
                         ));
                     }
                     ClientMessage::StatusOkCount { count } => {
-                        self.decoding = true;
                         if let Some(in_count) = expected_count {
                             if count == in_count {
                                 return Ok(());
@@ -134,7 +131,6 @@ impl Client {
                         ));
                     }
                     ClientMessage::StatusError { code, message } => {
-                        self.decoding = true;
                         let mes = format!("Status ERROR {}: {}!", code, message);
                         return Err(io::Error::new(io::ErrorKind::Other, mes));
                     }
@@ -143,7 +139,6 @@ impl Client {
                         partition,
                         offset,
                     } => {
-                        self.decoding = true;
                         let mes = format!(
                             "Unexpected CommitAck ERROR {}/{}: {}!",
                             topic, partition, offset
@@ -152,7 +147,6 @@ impl Client {
                     }
                     ClientMessage::MessagesAvailable { topic, partition } => {
                         self.do_fetch = Some(TopicPartition { topic, partition });
-                        self.decoding = true;
                     }
                     _ => {
                         // Should not happen, not a valid client message...

@@ -2,6 +2,7 @@
 // Turn back on when it works...
 #![allow(clippy::needless_lifetimes)]
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use futures::channel::mpsc;
@@ -29,6 +30,7 @@ struct ClientInfo {
     group_id: String,
     sub_type: SubType,
     is_internal: bool,
+    needs_fetch: Cell<bool>,
 }
 
 #[derive(Clone)]
@@ -168,7 +170,7 @@ impl BrokerManager {
     }
 }
 
-async fn fetch(
+fn fetch(
     offset: u64,
     msg_log: &MessageLog,
     client_tx: &mut mpsc::Sender<ClientMessage>,
@@ -178,14 +180,11 @@ async fn fetch(
     let info = msg_log.get_index(offset);
     if info.is_ok() {
         let info = info.unwrap();
-        if let Err(error) = client_tx
-            .send(ClientMessage::MessageBatch {
-                file_name: msg_log.log_file_name(),
-                start: info.position,
-                length: msg_log.log_file_end() - info.position,
-            })
-            .await
-        {
+        if let Err(error) = client_tx.try_send(ClientMessage::MessageBatch {
+            file_name: msg_log.log_file_name(),
+            start: info.position,
+            length: msg_log.log_file_end() - info.position,
+        }) {
             success = false;
             error!(
                 "Error fetching ({}) for client {}, dropping: {}",
@@ -196,7 +195,7 @@ async fn fetch(
     success
 }
 
-async fn fetch_with_pos(
+fn fetch_with_pos(
     tp: &TopicPartition,
     msg_log: &MessageLog,
     client: &mut ClientInfo,
@@ -207,7 +206,7 @@ async fn fetch_with_pos(
     let mut bad_client = false;
     match position {
         TopicPosition::Earliest => {
-            bad_client = !fetch(0, &msg_log, &mut client.tx, &client_name).await;
+            bad_client = !fetch(0, &msg_log, &mut client.tx, &client_name);
         }
         TopicPosition::Latest => {}
         TopicPosition::Current => {
@@ -227,14 +226,13 @@ async fn fetch_with_pos(
                     let offset_message = offset_message.unwrap();
                     let record: OffsetRecord =
                         serde_json::from_slice(&offset_message.payload[..]).unwrap(); // XXX TODO Don't unwrap...
-                    bad_client =
-                        !fetch(record.offset + 1, &msg_log, &mut client.tx, &client_name).await;
+                    bad_client = !fetch(record.offset + 1, &msg_log, &mut client.tx, &client_name);
                 } else {
                     info!(
                         "Issue retrieving consumer offset (probably not committed): {}, using 0.",
                         offset_message.unwrap_err()
                     );
-                    bad_client = !fetch(0, &msg_log, &mut client.tx, &client_name).await;
+                    bad_client = !fetch(0, &msg_log, &mut client.tx, &client_name);
                 }
             } else {
                 error!(
@@ -244,7 +242,7 @@ async fn fetch_with_pos(
             }
         }
         TopicPosition::Offset { offset } => {
-            bad_client = !fetch(offset, &msg_log, &mut client.tx, &client_name).await;
+            bad_client = !fetch(offset, &msg_log, &mut client.tx, &client_name);
         }
     }
     bad_client
@@ -284,6 +282,7 @@ async fn new_message_broker(
                     let client = client_tx.get(tx_key).unwrap();
                     let mut tx = client.tx.clone();
                     let is_internal = client.is_internal;
+                    let mut send_msg = true;
                     let message = if is_internal {
                         ClientMessage::InternalMessage {
                             message: message.clone(),
@@ -293,15 +292,24 @@ async fn new_message_broker(
                             SubType::Stream => ClientMessage::Message {
                                 message: message.clone(),
                             },
-                            SubType::Fetch => ClientMessage::MessagesAvailable {
-                                topic: tp.topic.clone(),
-                                partition: tp.partition,
-                            },
+                            SubType::Fetch => {
+                                if !client.needs_fetch.get() {
+                                    client.needs_fetch.set(true);
+                                } else {
+                                    send_msg = false;
+                                }
+                                ClientMessage::MessagesAvailable {
+                                    topic: tp.topic.clone(),
+                                    partition: tp.partition,
+                                }
+                            }
                         }
                     };
-                    if let Err(err) = tx.send(message).await {
-                        error!("Error writiing to client, will close. {}", err);
-                        bad_clients.push(tx_key.clone());
+                    if send_msg {
+                        if let Err(err) = tx.try_send(message) {
+                            error!("Error writing to client, will close. {}", err);
+                            bad_clients.push(tx_key.clone());
+                        }
                     }
                 }
                 for bad_client in bad_clients {
@@ -321,6 +329,7 @@ async fn new_message_broker(
                         group_id,
                         sub_type: SubType::Fetch,
                         is_internal,
+                        needs_fetch: Cell::new(true),
                     },
                 );
             }
@@ -333,8 +342,8 @@ async fn new_message_broker(
                     client.sub_type = sub_type;
                     if sub_type == SubType::Stream {
                         let bad_client =
-                            fetch_with_pos(&tp, &msg_log, client, &client_name, position, &log_dir)
-                                .await;
+                            fetch_with_pos(&tp, &msg_log, client, &client_name, position, &log_dir);
+                        client.needs_fetch.set(false);
                         if bad_client {
                             client_tx.remove(&client_name);
                         }
@@ -347,8 +356,8 @@ async fn new_message_broker(
             } => {
                 if let Some(client) = client_tx.get_mut(&client_name) {
                     let bad_client =
-                        fetch_with_pos(&tp, &msg_log, client, &client_name, position, &log_dir)
-                            .await;
+                        fetch_with_pos(&tp, &msg_log, client, &client_name, position, &log_dir);
+                    client.needs_fetch.set(false);
                     if bad_client {
                         client_tx.remove(&client_name);
                     }
