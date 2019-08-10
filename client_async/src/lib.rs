@@ -1,7 +1,4 @@
 #![feature(async_await)]
-// XXX This is producing false positives on async fns with reference params.
-// Turn back on when it works...
-#![allow(clippy::needless_lifetimes)]
 
 use std::collections::VecDeque;
 use std::io;

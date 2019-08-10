@@ -1,7 +1,3 @@
-// XXX This is producing false positives on async fns with reference params.
-// Turn back on when it works...
-#![allow(clippy::needless_lifetimes)]
-
 extern crate libc;
 
 use std::collections::HashMap;

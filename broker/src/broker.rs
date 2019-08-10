@@ -1,9 +1,6 @@
-// XXX This is producing false positives on async fns with reference params.
-// Turn back on when it works...
-#![allow(clippy::needless_lifetimes)]
-
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use futures::channel::mpsc;
 use futures::executor::ThreadPool;
@@ -56,16 +53,19 @@ pub enum BrokerMessage {
     CloseClient {
         client_name: String,
     },
+    Shutdown,
 }
 
 struct BrokerData {
     brokers: HashMap<TopicPartition, mpsc::Sender<BrokerMessage>>,
     threadpool: ThreadPool,
     topic_online_tx: mpsc::Sender<BrokerMessage>,
+    is_shutdown: bool,
 }
 
 pub struct BrokerManager {
     brokers: Mutex<BrokerData>,
+    count: Arc<Mutex<usize>>,
     log_dir: String,
 }
 
@@ -76,9 +76,15 @@ impl BrokerManager {
             topic: "__topic_online".to_string(),
             partition: 0,
         };
+        let count = Arc::new(Mutex::new(0));
         let (topic_online_tx, rx) = mpsc::channel::<BrokerMessage>(1000);
         //let (topic_online_tx, rx) = mpsc::unbounded::<BrokerMessage>();
-        if let Err(err) = threadpool.spawn(new_message_broker(rx, tp.clone(), log_dir.clone())) {
+        if let Err(err) = threadpool.spawn(new_message_broker(
+            rx,
+            tp.clone(),
+            log_dir.clone(),
+            count.clone(),
+        )) {
             error!(
                 "Got error spawning task for partion {}, topic {}, error: {}",
                 tp.partition, tp.topic, err
@@ -91,7 +97,9 @@ impl BrokerManager {
                 brokers: hm,
                 threadpool,
                 topic_online_tx,
+                is_shutdown: false,
             }),
+            count,
             log_dir,
         }
     }
@@ -101,6 +109,9 @@ impl BrokerManager {
         if topic_name.trim().ends_with('*') {
             let len = topic_name.len();
             let data = self.brokers.lock().await;
+            if data.is_shutdown {
+                return result;
+            }
             if len == 1 {
                 for key in data.brokers.keys() {
                     result.push(key.topic.clone());
@@ -122,18 +133,24 @@ impl BrokerManager {
         &self,
         tp: TopicPartition,
     ) -> Result<mpsc::Sender<BrokerMessage>, ()> {
-        let mut data = self.brokers.lock().await;
         let partition = tp.partition;
         let topic = tp.topic.clone(); // Use for error logging.
+        let mut data = self.brokers.lock().await;
+        if data.is_shutdown {
+            info!("Tried to get a broker after shutdown!");
+            return Err(());
+        }
         if data.brokers.contains_key(&tp) {
             return Ok(data.brokers.get(&tp).unwrap().clone());
         }
         let (tx, rx) = mpsc::channel::<BrokerMessage>(1000);
         data.brokers.insert(tp.clone(), tx.clone());
-        if let Err(err) =
-            data.threadpool
-                .spawn(new_message_broker(rx, tp.clone(), self.log_dir.clone()))
-        {
+        if let Err(err) = data.threadpool.spawn(new_message_broker(
+            rx,
+            tp.clone(),
+            self.log_dir.clone(),
+            self.count.clone(),
+        )) {
             error!(
                 "Got error spawning task for partion {}, topic {}, error: {}",
                 partition, topic, err
@@ -168,6 +185,36 @@ impl BrokerManager {
             Ok(tx.clone())
         }
     }
+
+    pub async fn shutdown(&self) {
+        let mut data = self.brokers.lock().await;
+        if data.is_shutdown {
+            info!("Tried to shutdown while shutting down!");
+        } else {
+            data.is_shutdown = true;
+            let keys: Vec<TopicPartition> = data.brokers.keys().cloned().collect();
+            for broker_key in keys {
+                let tx = data.brokers.get_mut(&broker_key).unwrap();
+                info!(
+                    "Closing broker for {}/{}.",
+                    broker_key.topic, broker_key.partition
+                );
+                if let Err(err) = tx.try_send(BrokerMessage::Shutdown) {
+                    error!(
+                        "Error closing to broker {}/{}. {}",
+                        broker_key.topic, broker_key.partition, err
+                    );
+                }
+            }
+            let mut going_down = true;
+            while going_down {
+                let count = self.count.lock().await;
+                if *count == 0 {
+                    going_down = false;
+                }
+            }
+        }
+    }
 }
 
 fn fetch(
@@ -178,8 +225,7 @@ fn fetch(
 ) -> bool {
     let mut success = true;
     let info = msg_log.get_index(offset);
-    if info.is_ok() {
-        let info = info.unwrap();
+    if let Ok(info) = info {
         if let Err(error) = client_tx.try_send(ClientMessage::MessageBatch {
             file_name: msg_log.log_file_name(),
             start: info.position,
@@ -219,11 +265,9 @@ fn fetch_with_pos(
                 partition: tp.partition,
             };
             let offset_log = MessageLog::new(&tp_offset, true, log_dir);
-            if offset_log.is_ok() {
-                let mut offset_log = offset_log.unwrap();
+            if let Ok(mut offset_log) = offset_log {
                 let offset_message = offset_log.get_message(0);
-                if offset_message.is_ok() {
-                    let offset_message = offset_message.unwrap();
+                if let Ok(offset_message) = offset_message {
                     let record: OffsetRecord =
                         serde_json::from_slice(&offset_message.payload[..]).unwrap(); // XXX TODO Don't unwrap...
                     bad_client = !fetch(record.offset + 1, &msg_log, &mut client.tx, &client_name);
@@ -248,16 +292,75 @@ fn fetch_with_pos(
     bad_client
 }
 
+fn handle_message(
+    mut message: Message,
+    tp: &TopicPartition,
+    msg_log: &mut MessageLog,
+    client_tx: &mut HashMap<String, ClientInfo>,
+) {
+    message.sequence = msg_log.offset();
+
+    if let Err(error) = msg_log.append(&message) {
+        error!("Failed to write message to log {}", error);
+        return;
+    }
+
+    let mut bad_clients = Vec::<String>::new();
+    for tx_key in client_tx.keys() {
+        let client = client_tx.get(tx_key).unwrap();
+        let mut tx = client.tx.clone();
+        let is_internal = client.is_internal;
+        let mut send_msg = true;
+        let message = if is_internal {
+            ClientMessage::InternalMessage {
+                message: message.clone(),
+            }
+        } else {
+            match client.sub_type {
+                SubType::Stream => ClientMessage::Message {
+                    message: message.clone(),
+                },
+                SubType::Fetch => {
+                    if !client.needs_fetch.get() {
+                        client.needs_fetch.set(true);
+                    } else {
+                        send_msg = false;
+                    }
+                    ClientMessage::MessagesAvailable {
+                        topic: tp.topic.clone(),
+                        partition: tp.partition,
+                    }
+                }
+            }
+        };
+        if send_msg {
+            if let Err(err) = tx.try_send(message) {
+                error!("Error writing to client, will close. {}", err);
+                bad_clients.push(tx_key.clone());
+            }
+        }
+    }
+    for bad_client in bad_clients {
+        client_tx.remove(&bad_client);
+    }
+}
+
 async fn new_message_broker(
     mut rx: mpsc::Receiver<BrokerMessage>,
     tp: TopicPartition,
     log_dir: String,
+    count: Arc<Mutex<usize>>,
 ) {
     info!(
         "Broker starting for partition {}, topic {}.",
         tp.partition, tp.topic
     );
+    {
+        let mut count = count.lock().await;
+        *count += 1;
+    }
 
+    let mut running = true;
     let msg_log = MessageLog::new(&tp, tp.topic.starts_with("__consumer_offsets"), &log_dir);
     if let Err(error) = msg_log {
         error!("Failed to open the message log {}", error);
@@ -266,55 +369,11 @@ async fn new_message_broker(
     let mut msg_log = msg_log.unwrap();
     let mut client_tx: HashMap<String, ClientInfo> = HashMap::new();
     let mut message = rx.next().await;
-    while message.is_some() {
+    while message.is_some() && running {
         let mes = message.clone().unwrap();
         match mes {
-            BrokerMessage::Message { mut message } => {
-                message.sequence = msg_log.offset();
-
-                if let Err(error) = msg_log.append(&message) {
-                    error!("Failed to write message to log {}", error);
-                    return;
-                }
-
-                let mut bad_clients = Vec::<String>::new();
-                for tx_key in client_tx.keys() {
-                    let client = client_tx.get(tx_key).unwrap();
-                    let mut tx = client.tx.clone();
-                    let is_internal = client.is_internal;
-                    let mut send_msg = true;
-                    let message = if is_internal {
-                        ClientMessage::InternalMessage {
-                            message: message.clone(),
-                        }
-                    } else {
-                        match client.sub_type {
-                            SubType::Stream => ClientMessage::Message {
-                                message: message.clone(),
-                            },
-                            SubType::Fetch => {
-                                if !client.needs_fetch.get() {
-                                    client.needs_fetch.set(true);
-                                } else {
-                                    send_msg = false;
-                                }
-                                ClientMessage::MessagesAvailable {
-                                    topic: tp.topic.clone(),
-                                    partition: tp.partition,
-                                }
-                            }
-                        }
-                    };
-                    if send_msg {
-                        if let Err(err) = tx.try_send(message) {
-                            error!("Error writing to client, will close. {}", err);
-                            bad_clients.push(tx_key.clone());
-                        }
-                    }
-                }
-                for bad_client in bad_clients {
-                    client_tx.remove(&bad_client);
-                }
+            BrokerMessage::Message { message } => {
+                handle_message(message, &tp, &mut msg_log, &mut client_tx);
             }
             BrokerMessage::NewClient {
                 client_name,
@@ -366,11 +425,28 @@ async fn new_message_broker(
             BrokerMessage::CloseClient { client_name } => {
                 client_tx.remove(&client_name);
             }
+            BrokerMessage::Shutdown => {
+                for tx_key in client_tx.keys() {
+                    let client = client_tx.get(tx_key).unwrap();
+                    let mut tx = client.tx.clone();
+                    info!("Closing client {}.", tx_key);
+                    if let Err(err) = tx.try_send(ClientMessage::Over) {
+                        error!("Error writing to client {} while closing. {}", tx_key, err);
+                    }
+                }
+                running = false;
+            }
         };
-        message = rx.next().await;
+        if running {
+            message = rx.next().await;
+        }
     }
     info!(
         "Broker ending for partition {}, topic {}.",
         tp.partition, tp.topic
     );
+    {
+        let mut count = count.lock().await;
+        *count -= 1;
+    }
 }
