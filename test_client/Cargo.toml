@@ -17,7 +17,7 @@ client_async = { path = "../client_async" }
 common = { path = "../common" }
 
 [dependencies.futures]
-version = "0.3.0-alpha.17"
+version = "0.3.0-alpha.18"
 package = "futures-preview"
 
 [build-dependencies]

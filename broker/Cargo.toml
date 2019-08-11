@@ -18,7 +18,7 @@ ctrlc = { version = "3.1.3", features = ["termination"] }
 common = { path = "../common" }
 
 [dependencies.futures]
-version = "0.3.0-alpha.17"
+version = "0.3.0-alpha.18"
 package = "futures-preview"
 
 [build-dependencies]
