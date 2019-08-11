@@ -5,6 +5,7 @@ use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::io::Write;
+use std::time::SystemTime;
 
 use log::error;
 
@@ -15,7 +16,7 @@ use common::util::*;
 
 pub struct LogIndex {
     pub offset: u64,
-    pub time: u64,
+    pub time: u128,
     pub position: u64,
     pub size: usize,
 }
@@ -128,10 +129,13 @@ impl MessageLog {
         self.log_append.write_all(v.as_bytes())?;
         self.log_append.write_all(&message.payload)?;
         self.log_append.flush()?;
+        let time: u128 = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(n) => n.as_millis(),
+            Err(_) => 0,
+        };
         let idx = LogIndex {
             offset: message.sequence as u64,
-            // XXX set time
-            time: 0,
+            time,
             position: self.log_end,
             size: v.as_bytes().len() + message.payload_size,
         };
