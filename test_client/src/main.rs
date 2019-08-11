@@ -4,6 +4,7 @@ use client_async::*;
 use futures::executor;
 use log::{error, Level, LevelFilter, Metadata, Record};
 use std::io;
+use std::time::SystemTime;
 
 use common::protocolx::*;
 use common::types::*;
@@ -92,6 +93,11 @@ fn main() -> io::Result<()> {
                     }
                 }
             } else {
+                let start_time: u128 =
+                    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+                        Ok(n) => n.as_millis(),
+                        Err(_) => 0,
+                    };
                 client.start_pub_batch().await?;
                 for n in 0..config.count {
                     if n > 0 && n % 1000 == 0 {
@@ -106,6 +112,17 @@ fn main() -> io::Result<()> {
                     }
                 }
                 client.end_pub_batch().await?;
+                let end_time: u128 = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
+                {
+                    Ok(n) => n.as_millis(),
+                    Err(_) => 0,
+                };
+                let run_time = (end_time - start_time) as f64 / 1000.0;
+                println!(
+                    "Ran for {} seconds, {} messages/second.",
+                    run_time,
+                    config.count as f64 / run_time
+                );
                 Ok(())
             }
         })
