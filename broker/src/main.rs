@@ -58,10 +58,10 @@ fn main() -> io::Result<()> {
         ctrlc::set_handler(move || {
             let shutdown_tx = &mut shutdown_tx.clone();
             info!("Got termination signal, shutting down.");
-            let fut = ctrlc_broker_manager.shutdown();
+            let fut = ctrlc_broker_manager.shutdown(10_000);
             let mut lp = LocalPool::new();
             lp.run_until(fut);
-            let fut = ctrlc_client_manager.is_shutdown();
+            let fut = ctrlc_client_manager.is_shutdown(5_000);
             lp.run_until(fut);
             if let Err(err) = shutdown_tx.try_send(1) {
                 error!("Failed to send shutdown message, {}.", err);

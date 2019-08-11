@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 /// Returns a tuple of the first brace and last brace if found in buf.
 /// Intended to find slices to deserialize with serde.
 /// It is NOT smart about braces embedded in strings.
@@ -21,4 +23,12 @@ pub fn find_brace(buf: &[u8]) -> Option<(usize, usize)> {
         };
     }
     None
+}
+
+/// Returns the current time as milliseconds from unix epoch.
+pub fn get_epoch_ms() -> u128 {
+    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(n) => n.as_millis(),
+        Err(_) => 0,
+    }
 }

@@ -1,5 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::thread::sleep;
+use std::time::Duration;
 
 use futures::channel::mpsc;
 use futures::executor::ThreadPool;
@@ -12,6 +14,7 @@ use romio::{TcpListener, TcpStream};
 
 use super::broker::*;
 use common::types::*;
+use common::util::*;
 
 use log::{error, info};
 
@@ -49,12 +52,23 @@ impl ClientManager {
         }
     }
 
-    pub async fn is_shutdown(&self) {
+    pub async fn is_shutdown(&self, timeout_ms: u128) {
+        // Note this not a well behaved async function but it is only intended
+        // to be run at shutdown and on the ctrlc signal thread.
+        let start_time = get_epoch_ms();
         let mut going_down = true;
         while going_down {
             let count = self.count.lock().await;
             if *count == 0 {
                 going_down = false;
+            }
+            let time = get_epoch_ms();
+            if (time - start_time) > timeout_ms {
+                error!("Timed out waiting for clients to shutdown!");
+                going_down = true;
+            }
+            if !going_down {
+                sleep(Duration::from_millis(200));
             }
         }
     }

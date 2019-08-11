@@ -1,6 +1,8 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::thread::sleep;
+use std::time::Duration;
 
 use futures::channel::mpsc;
 use futures::executor::ThreadPool;
@@ -11,6 +13,7 @@ use futures::StreamExt;
 
 use super::msglog::*;
 use common::types::*;
+use common::util::*;
 
 use crc::{crc32, Hasher32};
 use log::{error, info};
@@ -186,11 +189,14 @@ impl BrokerManager {
         }
     }
 
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&self, timeout_ms: u128) {
+        // Note this not a well behaved async function but it is only intended
+        // to be run at shutdown and on the ctrlc signal thread.
         let mut data = self.brokers.lock().await;
         if data.is_shutdown {
             info!("Tried to shutdown while shutting down!");
         } else {
+            let start_time = get_epoch_ms();
             data.is_shutdown = true;
             let keys: Vec<TopicPartition> = data.brokers.keys().cloned().collect();
             for broker_key in keys {
@@ -211,6 +217,14 @@ impl BrokerManager {
                 let count = self.count.lock().await;
                 if *count == 0 {
                     going_down = false;
+                }
+                let time = get_epoch_ms();
+                if (time - start_time) > timeout_ms {
+                    error!("Timed out waiting for brokers to shutdown!");
+                    going_down = true;
+                }
+                if !going_down {
+                    sleep(Duration::from_millis(200));
                 }
             }
         }
