@@ -49,15 +49,19 @@ fn main() -> io::Result<()> {
         let mut threadpool = ThreadPoolBuilder::new()
             .name_prefix("hermod Pool")
             .create()?;
+        let client_manager = Arc::new(ClientManager::new());
         let broker_manager = Arc::new(BrokerManager::new(threadpool.clone(), &config.log_dir));
 
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<u32>(1);
+        let ctrlc_client_manager = client_manager.clone();
         let ctrlc_broker_manager = broker_manager.clone();
         ctrlc::set_handler(move || {
             let shutdown_tx = &mut shutdown_tx.clone();
             info!("Got termination signal, shutting down.");
             let fut = ctrlc_broker_manager.shutdown();
             let mut lp = LocalPool::new();
+            lp.run_until(fut);
+            let fut = ctrlc_client_manager.is_shutdown();
             lp.run_until(fut);
             if let Err(err) = shutdown_tx.try_send(1) {
                 error!("Failed to send shutdown message, {}.", err);
@@ -72,6 +76,7 @@ fn main() -> io::Result<()> {
         threadpool
             .spawn(start_client(
                 threadpool.clone(),
+                client_manager,
                 broker_manager,
                 decoder_factory,
                 encoder_factory,

@@ -429,9 +429,12 @@ async fn new_message_broker(
                 for tx_key in client_tx.keys() {
                     let client = client_tx.get(tx_key).unwrap();
                     let mut tx = client.tx.clone();
-                    info!("Closing client {}.", tx_key);
-                    if let Err(err) = tx.try_send(ClientMessage::Over) {
-                        error!("Error writing to client {} while closing. {}", tx_key, err);
+                    if !tx.is_closed() {
+                        info!("Closing client {}.", tx_key);
+                        if let Err(err) = tx.try_send(ClientMessage::Over) {
+                            error!("Error writing to client {} while closing. {}", tx_key, err);
+                        }
+                        tx.close_channel();
                     }
                 }
                 running = false;

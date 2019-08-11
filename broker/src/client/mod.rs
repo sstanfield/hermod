@@ -4,6 +4,7 @@ use std::sync::Arc;
 use futures::channel::mpsc;
 use futures::executor::ThreadPool;
 use futures::io::AsyncReadExt;
+use futures::lock::Mutex;
 use futures::task::SpawnExt;
 use futures::StreamExt;
 
@@ -19,8 +20,49 @@ use crate::read_input::*;
 pub mod message_core;
 use crate::message_core::*;
 
+pub struct ClientManager {
+    count: Arc<Mutex<usize>>,
+}
+
+impl Default for ClientManager {
+    fn default() -> Self {
+        ClientManager {
+            count: Arc::new(Mutex::new(0)),
+        }
+    }
+}
+
+impl ClientManager {
+    pub fn new() -> ClientManager {
+        Default::default()
+    }
+
+    pub async fn inc_clients(&self) {
+        let mut count = self.count.lock().await;
+        *count += 1;
+    }
+
+    pub async fn dec_clients(&self) {
+        let mut count = self.count.lock().await;
+        if *count > 0 {
+            *count -= 1;
+        }
+    }
+
+    pub async fn is_shutdown(&self) {
+        let mut going_down = true;
+        while going_down {
+            let count = self.count.lock().await;
+            if *count == 0 {
+                going_down = false;
+            }
+        }
+    }
+}
+
 pub async fn start_client(
     mut threadpool: ThreadPool,
+    client_manager: Arc<ClientManager>,
     broker_manager: Arc<BrokerManager>,
     decoder_factory: ProtocolDecoderFactory,
     encoder_factory: ProtocolEncoderFactory,
@@ -38,6 +80,7 @@ pub async fn start_client(
                     .spawn(new_client(
                         stream.unwrap(),
                         connections,
+                        Arc::clone(&client_manager),
                         broker_manager.clone(),
                         threadpool.clone(),
                         decoder_factory,
@@ -56,11 +99,13 @@ pub async fn start_client(
 async fn new_client(
     stream: TcpStream,
     idx: u64,
+    client_manager: Arc<ClientManager>,
     broker_manager: Arc<BrokerManager>,
     mut threadpool: ThreadPool,
     decoder_factory: ProtocolDecoderFactory,
     encoder_factory: ProtocolEncoderFactory,
 ) {
+    client_manager.inc_clients().await;
     let addr = stream.peer_addr().unwrap();
     let (reader, writer) = stream.split();
     info!("Accepting sub stream from: {}", addr);
@@ -69,8 +114,17 @@ async fn new_client(
     let _client = threadpool
         .spawn_with_handle(client_incoming(broker_tx.clone(), reader, decoder_factory))
         .unwrap();
-    let mut mc = MessageCore::new(broker_tx, rx, idx, broker_manager, encoder_factory, writer);
+    let client_name_unique = format!("Client_{}:{}", idx, addr);
+    let mut mc = MessageCore::new(
+        broker_tx,
+        rx,
+        &client_name_unique,
+        broker_manager,
+        encoder_factory,
+        writer,
+    );
     mc.message_incoming().await;
 
     info!("Closing sub stream from: {}", addr);
+    client_manager.dec_clients().await;
 }

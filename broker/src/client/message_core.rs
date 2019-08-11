@@ -37,14 +37,13 @@ impl MessageCore {
     pub fn new(
         broker_tx: mpsc::Sender<ClientMessage>,
         rx: mpsc::Receiver<ClientMessage>,
-        idx: u64,
+        client_name_unique: &str,
         broker_manager: Arc<BrokerManager>,
         encoder_factory: ProtocolEncoderFactory,
         writer: WriteHalf<TcpStream>,
     ) -> MessageCore {
         let client_encoder = encoder_factory();
         let broker_tx_cache: HashMap<TopicPartition, mpsc::Sender<BrokerMessage>> = HashMap::new();
-        let client_name = format!("Client_{}", idx);
         let group_id: Option<String> = None;
         let buf_size = 1_024_000;
         let out_bytes = BytesMut::with_capacity(buf_size);
@@ -53,7 +52,7 @@ impl MessageCore {
             rx,
             broker_manager,
             broker_tx_cache,
-            client_name,
+            client_name: client_name_unique.to_string(),
             group_id,
             running: true,
             client_encoder,
@@ -326,7 +325,7 @@ impl MessageCore {
                 client_name,
                 group_id,
             } => {
-                self.client_name = client_name;
+                self.client_name = format!("{}:{}", client_name, self.client_name);
                 self.group_id = Some(group_id);
                 self.send(ClientMessage::StatusOk).await;
             }
@@ -416,6 +415,6 @@ impl MessageCore {
             }
         }
         self.rx.close();
-        info!("Exiting messaging_incoming.");
+        info!("Exiting messaging_incoming for {}.", self.client_name);
     }
 }
