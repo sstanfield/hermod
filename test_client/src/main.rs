@@ -119,7 +119,7 @@ fn main() -> io::Result<()> {
                 };
                 let run_time = (end_time - start_time) as f64 / 1000.0;
                 println!(
-                    "Ran for {} seconds, {} messages/second.",
+                    "##########Ran for {} seconds, {} messages/second.#######",
                     run_time,
                     config.count as f64 / run_time
                 );

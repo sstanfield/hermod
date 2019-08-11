@@ -335,7 +335,9 @@ fn handle_message(
                     message: message.clone(),
                 },
                 SubType::Fetch => {
-                    if !client.needs_fetch.get() {
+                    if !client.needs_fetch.get()
+                        && message.message_type != MessageType::BatchMessage
+                    {
                         client.needs_fetch.set(true);
                     } else {
                         send_msg = false;

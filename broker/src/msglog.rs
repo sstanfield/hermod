@@ -1,10 +1,7 @@
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
-use std::io::Read;
-use std::io::Seek;
-use std::io::SeekFrom;
-use std::io::Write;
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::time::SystemTime;
 
 use log::error;
@@ -58,10 +55,10 @@ enum MessageFromLog {
 pub struct MessageLog {
     log_file_name: String,
     log_file_idx_name: String,
-    log_append: File,
-    idx_append: File,
+    log_append: BufWriter<File>,
+    idx_append: BufWriter<File>,
     log_end: u64,
-    idx_end: u64,
+    log_flushed_end: u64,
     offset: u64,
     single_record: bool,
     partition: u64,
@@ -78,6 +75,7 @@ impl MessageLog {
             .open(&log_file_name)?;
         log_append.seek(SeekFrom::End(0))?;
         let log_end = log_append.seek(SeekFrom::Current(0))?;
+        let log_flushed_end = log_end;
 
         let log_file_idx_name = format!("{}/{}.{}.idx", log_dir, tp.topic, tp.partition);
         let mut idx_append = OpenOptions::new()
@@ -104,17 +102,17 @@ impl MessageLog {
         Ok(MessageLog {
             log_file_name,
             log_file_idx_name,
-            log_append,
-            idx_append,
+            log_append: BufWriter::with_capacity(2_048_000, log_append),
+            idx_append: BufWriter::with_capacity(2_048_000, idx_append),
             log_end,
-            idx_end,
+            log_flushed_end,
             offset,
             single_record,
             partition: tp.partition,
         })
     }
 
-    pub fn append(&mut self, message: &Message) -> io::Result<()> {
+    fn append_no_flush(&mut self, message: &Message) -> io::Result<()> {
         let v = format!(
             "{{\"Message\":{{\"topic\":\"{}\",\"payload_size\":{},\"crc\":{},\"sequence\":{}}}}}",
             message.topic, message.payload_size, message.crc, message.sequence
@@ -122,13 +120,12 @@ impl MessageLog {
         if self.single_record {
             // XXX need to truncate here?  Probably does not matter.
             self.log_append.seek(SeekFrom::Start(0))?;
-            self.log_append.set_len(0)?;
+            self.log_append.get_mut().set_len(0)?;
             self.idx_append.seek(SeekFrom::Start(0))?;
-            self.idx_append.set_len(0)?;
+            self.idx_append.get_mut().set_len(0)?;
         }
         self.log_append.write_all(v.as_bytes())?;
         self.log_append.write_all(&message.payload)?;
-        self.log_append.flush()?;
         let time: u128 = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
             Ok(n) => n.as_millis(),
             Err(_) => 0,
@@ -144,10 +141,19 @@ impl MessageLog {
         unsafe {
             self.idx_append.write_all(idx.as_bytes())?;
         }
-        self.idx_append.flush()?;
-        self.idx_end += std::mem::size_of::<LogIndex>() as u64;
         if !self.single_record {
             self.offset += 1;
+        }
+        Ok(())
+    }
+
+    pub fn append(&mut self, message: &Message) -> io::Result<()> {
+        self.append_no_flush(message)?;
+        let flush = message.message_type != MessageType::BatchMessage || self.single_record;
+        if flush {
+            self.log_append.flush()?;
+            self.idx_append.flush()?;
+            self.log_flushed_end = self.log_end;
         }
         Ok(())
     }
@@ -232,6 +238,6 @@ impl MessageLog {
         self.log_file_name.clone()
     }
     pub fn log_file_end(&self) -> u64 {
-        self.log_end
+        self.log_flushed_end
     }
 }
