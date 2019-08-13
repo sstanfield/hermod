@@ -2,7 +2,7 @@
 
 use client_async::*;
 use futures::executor;
-use log::{error, Level, LevelFilter, Metadata, Record};
+use log::{error, info, Level, LevelFilter, Metadata, Record};
 use std::io;
 use std::time::SystemTime;
 
@@ -80,13 +80,13 @@ fn main() -> io::Result<()> {
                         }
                         Err(error) => {
                             error!("Client read error: {}", error);
-                            return Ok(());
+                            return Err(error);
                         }
                     }
                     i += 1;
                     if config.count > 0 && i >= config.count {
-                        println!(
-                            "Consumer {} ending due to reaching count {}.",
+                        info!(
+                            "########### Consumer {} ending due to reaching count {}.##########",
                             config.name, config.count
                         );
                         return Ok(());
@@ -107,7 +107,7 @@ fn main() -> io::Result<()> {
                     let payload = format!("{}-{}\n", config.base_message, n);
                     //println!("XXX pub: {}", payload);
                     if let Err(err) = client.publish(&config.topic, 0, payload.as_bytes()).await {
-                        println!("Error publishing: {}.", err);
+                        error!("Error publishing: {}.", err);
                         return Err(err);
                     }
                 }
@@ -118,7 +118,7 @@ fn main() -> io::Result<()> {
                     Err(_) => 0,
                 };
                 let run_time = (end_time - start_time) as f64 / 1000.0;
-                println!(
+                info!(
                     "##########Ran for {} seconds, {} messages/second.#######",
                     run_time,
                     config.count as f64 / run_time

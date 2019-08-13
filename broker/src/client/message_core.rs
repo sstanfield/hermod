@@ -293,6 +293,7 @@ impl MessageCore {
             self.write_buffer().await;
             self.out_bytes.put_slice(&bytes);
         }
+        self.write_buffer().await;
     }
 
     async fn handle_message(&mut self, message: ClientMessage) {
@@ -404,7 +405,8 @@ impl MessageCore {
             if !self.running {
                 continue;
             }
-            if let Ok(m) = self.rx.try_next() {
+            // XXX Still thinking about this, does not seem to matter...
+            /*if let Ok(m) = self.rx.try_next() {
                 // Next message is already here, go ahead and get it on the output
                 // buffer.
                 message = m;
@@ -412,7 +414,8 @@ impl MessageCore {
                 // Need to wait so go ahead and send data to client.
                 self.write_buffer().await; //, &mut self.out_bytes);
                 message = self.rx.next().await;
-            }
+            }*/
+            message = self.rx.next().await;
         }
         self.rx.close();
         info!("Exiting messaging_incoming for {}.", self.client_name);

@@ -435,7 +435,18 @@ impl Client {
                     ClientMessage::Message { message } => {
                         self.decoding = true;
                         self.last_offset = message.sequence;
-                        return Ok(message);
+                        let mut digest = crc32::Digest::new(crc32::IEEE);
+                        digest.write(&message.payload);
+                        let crc = digest.sum32();
+                        return if crc == message.crc {
+                            Ok(message)
+                        } else {
+                            error!("Message has invalid crc, rejecting.");
+                            Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                "Message has invalid crc, rejecting.",
+                            ))
+                        };
                     }
                     ClientMessage::StatusOk => {
                         self.decoding = true;
