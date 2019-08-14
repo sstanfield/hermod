@@ -34,6 +34,107 @@ impl log::Log for SimpleLogger {
 
 static LOGGER: SimpleLogger = SimpleLogger;
 
+async fn run_consumer(client: &mut Client, config: &Config) -> io::Result<()> {
+    let sub_type = if config.fetch {
+        SubType::Fetch
+    } else {
+        SubType::Stream
+    };
+    client
+        .subscribe(&config.topic, TopicPosition::Current, sub_type)
+        .await?;
+    client
+        .fetch(&config.topic, 0, TopicPosition::Current)
+        .await?;
+    let mut i = 0;
+    let mut start_time: Option<u128> = None;
+    loop {
+        match client.next_message().await {
+            Ok(message) => {
+                if start_time.is_none() {
+                    start_time = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+                        Ok(n) => Some(n.as_millis()),
+                        Err(_) => None,
+                    };
+                }
+                /*println!(
+                    "Message loopy: {}",
+                    String::from_utf8(message.payload).unwrap()
+                );*/
+                if message.sequence % 100 == 0 {
+                    client
+                        .commit_offset(&config.topic, 0, message.sequence)
+                        .await
+                        .unwrap();
+                }
+            }
+            Err(error) => {
+                error!("Client read error: {}", error);
+                return Err(error);
+            }
+        }
+        i += 1;
+        if config.count > 0 && i >= config.count {
+            if let Some(start_time) = start_time {
+                let end_time: u128 = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
+                {
+                    Ok(n) => n.as_millis(),
+                    Err(_) => 0,
+                };
+                let run_time = (end_time - start_time) as f64 / 1000.0;
+                info!(
+                    "##########CLIENT {} Ran for {} seconds, {} messages/second.#######",
+                    config.name,
+                    run_time,
+                    config.count as f64 / run_time
+                );
+            }
+            info!(
+                "########### Consumer {} ending due to reaching count {}.##########",
+                config.name, config.count
+            );
+            return Ok(());
+        }
+    }
+}
+
+async fn run_publisher(client: &mut Client, config: &Config) -> io::Result<()> {
+    let start_time: u128 = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(n) => n.as_millis(),
+        Err(_) => 0,
+    };
+    if config.batch {
+        client.start_pub_batch().await?;
+    }
+    for n in 0..config.count {
+        if config.batch && n > 0 && n % 1000 == 0 {
+            client.end_pub_batch().await?;
+            client.start_pub_batch().await?;
+        }
+        let payload = format!("{}-{}\n", config.base_message, n);
+        //println!("XXX pub: {}", payload);
+        if let Err(err) = client.publish(&config.topic, 0, payload.as_bytes()).await {
+            error!("Error publishing: {}.", err);
+            return Err(err);
+        }
+    }
+    if config.batch {
+        client.end_pub_batch().await?;
+    }
+    let end_time: u128 = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(n) => n.as_millis(),
+        Err(_) => 0,
+    };
+    let run_time = (end_time - start_time) as f64 / 1000.0;
+    info!(
+        "##########PUBLISHER {} Ran for {} seconds, {} messages/second.#######",
+        config.name,
+        run_time,
+        config.count as f64 / run_time
+    );
+    Ok(())
+}
+
 fn main() -> io::Result<()> {
     log::set_logger(&LOGGER)
         .map(|()| log::set_max_level(LevelFilter::Info))
@@ -49,81 +150,16 @@ fn main() -> io::Result<()> {
             let mut client = Client::connect(
                 config.remote,
                 config.name.clone(),
-                config.group,
+                config.group.clone(),
                 client_decoder_factory,
                 encoder_factory,
             )
             .await
             .unwrap();
             if config.is_client {
-                client
-                    .subscribe(&config.topic, TopicPosition::Current, SubType::Fetch)
-                    //.subscribe(&config.topic, TopicPosition::Current, SubType::Stream)
-                    .await?;
-                client
-                    .fetch(&config.topic, 0, TopicPosition::Current)
-                    .await?;
-                let mut i = 0;
-                loop {
-                    match client.next_message().await {
-                        Ok(message) => {
-                            /*println!(
-                                "Message loopy: {}",
-                                String::from_utf8(message.payload).unwrap()
-                            );*/
-                            if message.sequence % 100 == 0 {
-                                client
-                                    .commit_offset(&config.topic, 0, message.sequence)
-                                    .await
-                                    .unwrap();
-                            }
-                        }
-                        Err(error) => {
-                            error!("Client read error: {}", error);
-                            return Err(error);
-                        }
-                    }
-                    i += 1;
-                    if config.count > 0 && i >= config.count {
-                        info!(
-                            "########### Consumer {} ending due to reaching count {}.##########",
-                            config.name, config.count
-                        );
-                        return Ok(());
-                    }
-                }
+                run_consumer(&mut client, &config).await
             } else {
-                let start_time: u128 =
-                    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
-                        Ok(n) => n.as_millis(),
-                        Err(_) => 0,
-                    };
-                client.start_pub_batch().await?;
-                for n in 0..config.count {
-                    if n > 0 && n % 1000 == 0 {
-                        client.end_pub_batch().await?;
-                        client.start_pub_batch().await?;
-                    }
-                    let payload = format!("{}-{}\n", config.base_message, n);
-                    //println!("XXX pub: {}", payload);
-                    if let Err(err) = client.publish(&config.topic, 0, payload.as_bytes()).await {
-                        error!("Error publishing: {}.", err);
-                        return Err(err);
-                    }
-                }
-                client.end_pub_batch().await?;
-                let end_time: u128 = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
-                {
-                    Ok(n) => n.as_millis(),
-                    Err(_) => 0,
-                };
-                let run_time = (end_time - start_time) as f64 / 1000.0;
-                info!(
-                    "##########Ran for {} seconds, {} messages/second.#######",
-                    run_time,
-                    config.count as f64 / run_time
-                );
-                Ok(())
+                run_publisher(&mut client, &config).await
             }
         })
     } else {

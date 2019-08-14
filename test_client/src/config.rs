@@ -10,6 +10,8 @@ pub struct Config {
     pub remote: SocketAddr,
     pub count: usize,
     pub base_message: String,
+    pub fetch: bool,
+    pub batch: bool,
 }
 
 const VERSION_STRING: &str = env!("VERSION_STRING");
@@ -24,6 +26,8 @@ FLAGS:
     -p, --publish  Publish messages to broker
     -c, --consume  Subscribe to topic
     -v, --version  Print the version, platform and revision of client then exit
+        --stream   Use stream vs fetch for getting messages
+        --no_batch Do not batch messages if publishing
 
 OPTIONS:
     -r, --remote <hermod server>  Sets the remote hermod server (server:port).
@@ -58,6 +62,8 @@ pub fn get_config() -> Result<Config, ()> {
     let mut count = 0;
     let mut base_message = "SOME MESSAGE".to_string();
     let mut remote: SocketAddr = "127.0.0.1:7878".parse().unwrap();
+    let mut fetch = true;
+    let mut batch = true;
 
     if let Some(name_os) = env::var_os("HERMOD_CLIENT_REMOTE") {
         if let Ok(r) = name_os.into_string() {
@@ -123,6 +129,12 @@ pub fn get_config() -> Result<Config, ()> {
                         version();
                         return Err(());
                     }
+                    "--stream" => {
+                        fetch = false;
+                    }
+                    "--no_batch" => {
+                        batch = false;
+                    }
                     "-h" | "--help" => {
                         help(&exe_name);
                         return Err(());
@@ -146,5 +158,7 @@ pub fn get_config() -> Result<Config, ()> {
         remote,
         count,
         base_message,
+        fetch,
+        batch,
     })
 }
