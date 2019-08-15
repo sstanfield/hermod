@@ -35,6 +35,7 @@ if [[ $? -ne 0 ]]; then
 fi
 
 kill $hermod_pid
+wait $hermod_pid
 
 md5sum test_logs/test_top1.0.log
 #echo "58e84656b6e53a74301993e874ad7111  test_logs/test_top1.0.log"
