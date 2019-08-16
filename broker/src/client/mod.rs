@@ -78,8 +78,8 @@ pub async fn start_client(
     mut threadpool: ThreadPool,
     client_manager: Arc<ClientManager>,
     broker_manager: Arc<BrokerManager>,
-    decoder_factory: ProtocolDecoderFactory,
-    encoder_factory: ProtocolEncoderFactory,
+    decoder_factory: ProtocolServerDecoderFactory,
+    encoder_factory: ProtocolServerEncoderFactory,
     bind_addr: SocketAddr,
 ) {
     match TcpListener::bind(&bind_addr) {
@@ -116,8 +116,8 @@ async fn new_client(
     client_manager: Arc<ClientManager>,
     broker_manager: Arc<BrokerManager>,
     mut threadpool: ThreadPool,
-    decoder_factory: ProtocolDecoderFactory,
-    encoder_factory: ProtocolEncoderFactory,
+    decoder_factory: ProtocolServerDecoderFactory,
+    encoder_factory: ProtocolServerEncoderFactory,
 ) {
     client_manager.inc_clients().await;
     let addr = stream.peer_addr().unwrap();

@@ -17,10 +17,10 @@ async fn send_client_error(
     message: &str,
 ) {
     if let Err(err) = message_incoming_tx
-        .send(ClientMessage::StatusError {
+        .send(ClientMessage::ToClient(ServerToClient::StatusError {
             code,
             message: message.to_string(),
-        })
+        }))
         .await
     {
         error!(
@@ -42,9 +42,9 @@ macro_rules! send {
 pub async fn client_incoming(
     mut message_incoming_tx: mpsc::Sender<ClientMessage>,
     mut reader: ReadHalf<TcpStream>,
-    decoder_factor: ProtocolDecoderFactory,
+    client_decoder_factor: ProtocolServerDecoderFactory,
 ) {
-    let mut decoder = decoder_factor();
+    let mut decoder = client_decoder_factor();
     let buf_size = 32000;
     let mut in_bytes = BytesMut::with_capacity(buf_size);
     in_bytes.resize(buf_size, 0);
@@ -82,7 +82,7 @@ pub async fn client_incoming(
                             Ok(Some(incoming)) => {
                                 send!(
                                     message_incoming_tx,
-                                    incoming,
+                                    ClientMessage::ToServer(incoming),
                                     cont,
                                     "Error sending client message, closing connection!"
                                 );
@@ -116,7 +116,10 @@ pub async fn client_incoming(
             }
         }
     }
-    if let Err(err) = message_incoming_tx.send(ClientMessage::Over).await {
+    if let Err(err) = message_incoming_tx
+        .send(ClientMessage::ToClient(ServerToClient::Over))
+        .await
+    {
         debug!("Got error when on client exit, not important: {}", err);
         // ignore, no longer matters...
     }

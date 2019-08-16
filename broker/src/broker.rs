@@ -243,11 +243,13 @@ fn fetch(
     let mut success = true;
     let info = msg_log.get_index(offset);
     if let Ok(info) = info {
-        if let Err(error) = client_tx.try_send(ClientMessage::MessageBatch {
-            file_name: msg_log.log_file_name(),
-            start: info.position,
-            length: msg_log.log_file_end() - info.position,
-        }) {
+        if let Err(error) =
+            client_tx.try_send(ClientMessage::ToClient(ServerToClient::MessageBatch {
+                file_name: msg_log.log_file_name(),
+                start: info.position,
+                length: msg_log.log_file_end() - info.position,
+            }))
+        {
             success = false;
             error!(
                 "Error fetching ({}) for client {}, dropping: {}",
@@ -329,14 +331,14 @@ fn handle_message(
         let is_internal = client.is_internal;
         let mut send_msg = true;
         let message = if is_internal {
-            ClientMessage::InternalMessage {
+            ClientMessage::ToClient(ServerToClient::InternalMessage {
                 message: message.clone(),
-            }
+            })
         } else {
             match client.sub_type {
-                SubType::Stream => ClientMessage::Message {
+                SubType::Stream => ClientMessage::ToClient(ServerToClient::Message {
                     message: message.clone(),
-                },
+                }),
                 SubType::Fetch => {
                     if !client.needs_fetch.get()
                         && message.message_type != MessageType::BatchMessage
@@ -345,10 +347,10 @@ fn handle_message(
                     } else {
                         send_msg = false;
                     }
-                    ClientMessage::MessagesAvailable {
+                    ClientMessage::ToClient(ServerToClient::MessagesAvailable {
                         topic: tp.topic.clone(),
                         partition: tp.partition,
-                    }
+                    })
                 }
             }
         };
@@ -455,7 +457,8 @@ async fn new_message_broker(
                     let mut tx = client.tx.clone();
                     if !tx.is_closed() {
                         info!("Closing client {}.", tx_key);
-                        if let Err(err) = tx.try_send(ClientMessage::Over) {
+                        if let Err(err) = tx.try_send(ClientMessage::ToClient(ServerToClient::Over))
+                        {
                             error!("Error writing to client {} while closing. {}", tx_key, err);
                         }
                         tx.close_channel();

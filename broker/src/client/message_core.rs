@@ -28,7 +28,7 @@ pub struct MessageCore {
     client_name: String,
     group_id: Option<String>,
     running: bool,
-    client_encoder: Box<dyn ProtocolEncoder>,
+    client_encoder: Box<dyn ProtocolServerEncoder>,
     writer: WriteHalf<TcpStream>,
     out_bytes: BytesMut,
     message_batch: Option<Vec<Message>>,
@@ -40,7 +40,7 @@ impl MessageCore {
         rx: mpsc::Receiver<ClientMessage>,
         client_name_unique: &str,
         broker_manager: Arc<BrokerManager>,
-        encoder_factory: ProtocolEncoderFactory,
+        encoder_factory: ProtocolServerEncoderFactory,
         writer: WriteHalf<TcpStream>,
     ) -> MessageCore {
         let client_encoder = encoder_factory();
@@ -194,7 +194,7 @@ impl MessageCore {
 
     async fn check_connected(&mut self) -> bool {
         if self.group_id.is_none() {
-            self.send(ClientMessage::StatusError {
+            self.send(ServerToClient::StatusError {
                 code: 503,
                 message: "Client not initialized (connect first), closing connection!".to_string(),
             })
@@ -231,7 +231,7 @@ impl MessageCore {
                     error!("Error sending to broker: {}", error);
                     self.running = false;
                 }
-                self.send(ClientMessage::CommitAck {
+                self.send(ServerToClient::CommitAck {
                     topic,
                     partition,
                     offset: commit_offset,
@@ -276,7 +276,7 @@ impl MessageCore {
                             }
                         }
                     }
-                    self.send(ClientMessage::StatusOk).await;
+                    self.send(ServerToClient::StatusOk).await;
                 }
                 MessageType::BatchMessage => {
                     // No feedback during a batch.
@@ -300,13 +300,13 @@ impl MessageCore {
                             }
                         }
                     }
-                    self.send(ClientMessage::StatusOkCount { count }).await;
+                    self.send(ServerToClient::StatusOkCount { count }).await;
                 }
             }
         }
     }
 
-    async fn send(&mut self, message: ClientMessage) {
+    async fn send(&mut self, message: ServerToClient) {
         if let EncodeStatus::BufferToSmall(bytes) =
             self.client_encoder.encode(&mut self.out_bytes, message)
         {
@@ -316,47 +316,23 @@ impl MessageCore {
         self.write_buffer().await;
     }
 
-    async fn handle_message(&mut self, message: ClientMessage) {
+    async fn handle_toserver_message(&mut self, message: ClientToServer) {
         match message {
-            ClientMessage::Over => {
-                self.running = false;
-            }
-            ClientMessage::StatusError { code, message } => {
-                self.send(ClientMessage::StatusError { code, message })
-                    .await;
-            }
-            ClientMessage::StatusOk => {
-                self.send(ClientMessage::StatusOk).await;
-            }
-            ClientMessage::InternalMessage { .. } => {
-                //println!("XXXX internal {}: {}", message.topic, std::str::from_utf8(&message.payload[..]).unwrap());
-            }
-            ClientMessage::IncomingBatch => {
+            ClientToServer::Batch => {
                 self.message_batch = Some(Vec::with_capacity(100));
             }
-            ClientMessage::IncomingBatchCount { count } => {
+            ClientToServer::BatchCount { count } => {
                 self.message_batch = Some(Vec::with_capacity(count));
             }
-            ClientMessage::Message { message } => {
-                self.send(ClientMessage::Message { message }).await;
-            }
-            ClientMessage::MessageBatch {
-                file_name,
-                start,
-                length,
-            } => {
-                self.write_buffer().await; // Flush buffer first.
-                self.send_messages(file_name.clone(), start, length).await;
-            }
-            ClientMessage::Connect {
+            ClientToServer::Connect {
                 client_name,
                 group_id,
             } => {
                 self.client_name = format!("{}:{}", client_name, self.client_name);
                 self.group_id = Some(group_id);
-                self.send(ClientMessage::StatusOk).await;
+                self.send(ServerToClient::StatusOk).await;
             }
-            ClientMessage::Subscribe {
+            ClientToServer::Subscribe {
                 topic,
                 partition,
                 position,
@@ -375,48 +351,78 @@ impl MessageCore {
                         )
                         .await;
                     }
-                    self.send(ClientMessage::StatusOk).await;
+                    self.send(ServerToClient::StatusOk).await;
                 }
             }
-            ClientMessage::Unsubscribe { .. } => {
+            ClientToServer::Unsubscribe { .. } => {
                 // XXX implement... topic: _ } => {
-                self.send(ClientMessage::StatusOk).await;
+                self.send(ServerToClient::StatusOk).await;
             }
-            ClientMessage::ClientDisconnect => {
+            ClientToServer::ClientDisconnect => {
                 info!("Client close request.");
                 self.running = false;
             }
-            ClientMessage::Commit {
+            ClientToServer::Commit {
                 topic,
                 partition,
                 commit_offset,
             } => {
                 self.commit(topic, partition, commit_offset).await;
             }
-            ClientMessage::PublishMessage { message } => {
+            ClientToServer::PublishMessage { message } => {
                 self.publish_message(message).await;
             }
-            ClientMessage::Fetch {
+            ClientToServer::Fetch {
                 topic,
                 partition,
                 position,
             } => {
                 self.fetch(topic, partition, position).await;
             }
-            ClientMessage::MessagesAvailable { topic, partition } => {
-                self.send(ClientMessage::MessagesAvailable { topic, partition })
-                    .await;
-            }
-            ClientMessage::Noop => {
+            ClientToServer::PublishBatchStart { .. } => {}
+            ClientToServer::StatusOk => {}
+            ClientToServer::Noop => {
                 // Like the name says...
             }
-            ClientMessage::StatusOkCount { .. } => {
+        };
+    }
+
+    async fn handle_toclient_message(&mut self, message: ServerToClient) {
+        match message {
+            ServerToClient::Over => {
+                self.running = false;
+            }
+            ServerToClient::StatusError { code, message } => {
+                self.send(ServerToClient::StatusError { code, message })
+                    .await;
+            }
+            ServerToClient::StatusOk => {
+                self.send(ServerToClient::StatusOk).await;
+            }
+            ServerToClient::InternalMessage { .. } => {}
+            ServerToClient::Message { message } => {
+                self.send(ServerToClient::Message { message }).await;
+            }
+            ServerToClient::MessageBatch {
+                file_name,
+                start,
+                length,
+            } => {
+                self.write_buffer().await; // Flush buffer first.
+                self.send_messages(file_name.clone(), start, length).await;
+            }
+
+            ServerToClient::MessagesAvailable { topic, partition } => {
+                self.send(ServerToClient::MessagesAvailable { topic, partition })
+                    .await;
+            }
+            ServerToClient::Noop => {
+                // Like the name says...
+            }
+            ServerToClient::StatusOkCount { .. } => {
                 // Ignore (or maybe abort client), should not happen...
             }
-            ClientMessage::PublishBatchStart { .. } => {
-                // Ignore (or maybe abort client), should not happen...
-            }
-            ClientMessage::CommitAck { .. } => {
+            ServerToClient::CommitAck { .. } => {
                 // Ignore (or maybe abort client), should not happen...
             }
         };
@@ -427,7 +433,14 @@ impl MessageCore {
         while self.running && message.is_some() {
             let mes = message.unwrap();
             message = None;
-            self.handle_message(mes).await;
+            match mes {
+                ClientMessage::ToServer(m) => {
+                    self.handle_toserver_message(m).await;
+                }
+                ClientMessage::ToClient(m) => {
+                    self.handle_toclient_message(m).await;
+                }
+            }
             if !self.running {
                 continue;
             }

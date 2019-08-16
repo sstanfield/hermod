@@ -29,8 +29,8 @@ pub struct Client {
     remote: SocketAddr,
     reader: ReadHalf<TcpStream>,
     writer: WriteHalf<TcpStream>,
-    codec: Box<dyn ProtocolDecoder>,
-    encoder: Box<dyn ProtocolEncoder>,
+    codec: Box<dyn ProtocolClientDecoder>,
+    encoder: Box<dyn ProtocolClientEncoder>,
     buf_size: usize,
     in_bytes: BytesMut,
     out_bytes: BytesMut,
@@ -47,7 +47,7 @@ pub struct Client {
 }
 
 impl Client {
-    async fn next_client_message(&mut self) -> io::Result<Option<ClientMessage>> {
+    async fn next_client_message(&mut self) -> io::Result<Option<ServerToClient>> {
         let input = if self.decoding && !self.in_bytes.is_empty() {
             Ok(self.in_bytes.len())
         } else {
@@ -101,10 +101,10 @@ impl Client {
         loop {
             if let Some(client_message) = self.next_client_message().await? {
                 match client_message {
-                    ClientMessage::Message { message } => {
+                    ServerToClient::Message { message } => {
                         self.messages.push_back(message);
                     }
-                    ClientMessage::StatusOk => {
+                    ServerToClient::StatusOk => {
                         if expected_count.is_none() {
                             return Ok(());
                         }
@@ -113,7 +113,7 @@ impl Client {
                             "Got unexpected StatusOk!",
                         ));
                     }
-                    ClientMessage::StatusOkCount { count } => {
+                    ServerToClient::StatusOkCount { count } => {
                         if let Some(in_count) = expected_count {
                             if count == in_count {
                                 return Ok(());
@@ -127,11 +127,11 @@ impl Client {
                             "Got unexpected StatusOkCount!",
                         ));
                     }
-                    ClientMessage::StatusError { code, message } => {
+                    ServerToClient::StatusError { code, message } => {
                         let mes = format!("Status ERROR {}: {}!", code, message);
                         return Err(io::Error::new(io::ErrorKind::Other, mes));
                     }
-                    ClientMessage::CommitAck {
+                    ServerToClient::CommitAck {
                         topic,
                         partition,
                         offset,
@@ -142,7 +142,7 @@ impl Client {
                         );
                         return Err(io::Error::new(io::ErrorKind::Other, mes));
                     }
-                    ClientMessage::MessagesAvailable { topic, partition } => {
+                    ServerToClient::MessagesAvailable { topic, partition } => {
                         self.do_fetch = Some(TopicPartition { topic, partition });
                     }
                     _ => {
@@ -161,8 +161,8 @@ impl Client {
         remote: SocketAddr,
         client_name: String,
         group_id: String,
-        decoder_factory: ProtocolDecoderFactory,
-        encoder_factory: ProtocolEncoderFactory,
+        decoder_factory: ProtocolClientDecoderFactory,
+        encoder_factory: ProtocolClientEncoderFactory,
     ) -> io::Result<Client> {
         let codec = decoder_factory();
         let mut encoder = encoder_factory();
@@ -178,7 +178,7 @@ impl Client {
             encoder,
             writer,
             scratch_bytes,
-            ClientMessage::Connect {
+            ClientToServer::Connect {
                 client_name: client_name.clone(),
                 group_id: group_id.clone()
             }
@@ -204,7 +204,7 @@ impl Client {
             do_fetch: None,
         };
         match client.next_client_message().await? {
-            Some(ClientMessage::StatusOk) => Ok(client),
+            Some(ServerToClient::StatusOk) => Ok(client),
             _ => Err(io::Error::new(
                 io::ErrorKind::Other,
                 "Did not get OK from server, closing!",
@@ -225,13 +225,13 @@ impl Client {
             self.encoder,
             self.writer,
             self.scratch_bytes,
-            ClientMessage::Connect {
+            ClientToServer::Connect {
                 client_name: self.client_name.clone(),
                 group_id: self.group_id.clone()
             }
         );
         match self.next_client_message().await? {
-            Some(ClientMessage::StatusOk) => Ok(()),
+            Some(ServerToClient::StatusOk) => Ok(()),
             _ => Err(io::Error::new(
                 io::ErrorKind::Other,
                 "Did not get OK from server, closing!",
@@ -249,7 +249,7 @@ impl Client {
             self.encoder,
             self.writer,
             self.scratch_bytes,
-            ClientMessage::Subscribe {
+            ClientToServer::Subscribe {
                 topic: topic.to_string(),
                 partition: 0,
                 position,
@@ -270,7 +270,7 @@ impl Client {
             self.encoder,
             self.writer,
             self.scratch_bytes,
-            ClientMessage::Fetch {
+            ClientToServer::Fetch {
                 topic: topic.to_string(),
                 partition,
                 position,
@@ -293,7 +293,7 @@ impl Client {
             self.encoder,
             self.writer,
             self.scratch_bytes,
-            ClientMessage::Commit {
+            ClientToServer::Commit {
                 topic: topic.to_string(),
                 partition,
                 commit_offset
@@ -302,16 +302,16 @@ impl Client {
         loop {
             if let Some(client_message) = self.next_client_message().await? {
                 match client_message {
-                    ClientMessage::Message { message } => {
+                    ServerToClient::Message { message } => {
                         self.decoding = true;
                         self.messages.push_back(message);
                     }
-                    ClientMessage::StatusError { code, message } => {
+                    ServerToClient::StatusError { code, message } => {
                         self.decoding = true;
                         let mes = format!("Status ERROR {}: {}!", code, message);
                         return Err(io::Error::new(io::ErrorKind::Other, mes));
                     }
-                    ClientMessage::CommitAck {
+                    ServerToClient::CommitAck {
                         topic: t,
                         partition: p,
                         offset: o,
@@ -326,7 +326,7 @@ impl Client {
                         );
                         return Err(io::Error::new(io::ErrorKind::Other, mes));
                     }
-                    ClientMessage::MessagesAvailable { topic, partition } => {
+                    ServerToClient::MessagesAvailable { topic, partition } => {
                         self.do_fetch = Some(TopicPartition { topic, partition });
                         self.decoding = true;
                     }
@@ -357,7 +357,7 @@ impl Client {
                 self.encoder,
                 self.writer,
                 self.scratch_bytes,
-                ClientMessage::PublishBatchStart {
+                ClientToServer::PublishBatchStart {
                     count: self.batch_count
                 }
             );
@@ -376,7 +376,7 @@ impl Client {
         digest.write(payload);
         let crc = digest.sum32();
         // XXX check that payload is not to large.
-        let packet = ClientMessage::PublishMessage {
+        let packet = ClientToServer::PublishMessage {
             message: Message {
                 message_type: MessageType::Message,
                 topic: topic.to_string(),
@@ -432,7 +432,7 @@ impl Client {
         loop {
             if let Some(client_message) = self.next_client_message().await? {
                 match client_message {
-                    ClientMessage::Message { message } => {
+                    ServerToClient::Message { message } => {
                         self.decoding = true;
                         self.last_offset = message.sequence;
                         let mut digest = crc32::Digest::new(crc32::IEEE);
@@ -448,26 +448,26 @@ impl Client {
                             ))
                         };
                     }
-                    ClientMessage::StatusOk => {
+                    ServerToClient::StatusOk => {
                         self.decoding = true;
                         return Err(io::Error::new(
                             io::ErrorKind::Other,
                             "Got unexpected StatusOk!",
                         ));
                     }
-                    ClientMessage::StatusOkCount { .. } => {
+                    ServerToClient::StatusOkCount { .. } => {
                         self.decoding = true;
                         return Err(io::Error::new(
                             io::ErrorKind::Other,
                             "Got unexpected StatusOkCount!",
                         ));
                     }
-                    ClientMessage::StatusError { code, message } => {
+                    ServerToClient::StatusError { code, message } => {
                         self.decoding = true;
                         let mes = format!("Status ERROR {}: {}!", code, message);
                         return Err(io::Error::new(io::ErrorKind::Other, mes));
                     }
-                    ClientMessage::CommitAck {
+                    ServerToClient::CommitAck {
                         topic,
                         partition,
                         offset,
@@ -479,7 +479,7 @@ impl Client {
                         );
                         return Err(io::Error::new(io::ErrorKind::Other, mes));
                     }
-                    ClientMessage::MessagesAvailable { topic, partition } => {
+                    ServerToClient::MessagesAvailable { topic, partition } => {
                         if let Err(err) = self
                             .fetch(
                                 &topic,

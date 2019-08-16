@@ -164,9 +164,9 @@ impl ServerDecoder {
     }
 }
 
-impl ProtocolDecoder for ServerDecoder {
-    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<ClientMessage>> {
-        let mut result: io::Result<Option<ClientMessage>> = Ok(None);
+impl ProtocolServerDecoder for ServerDecoder {
+    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<ClientToServer>> {
+        let mut result: io::Result<Option<ClientToServer>> = Ok(None);
         if self.message.is_none() {
             if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
                 buf.advance(first_brace);
@@ -208,11 +208,11 @@ impl ProtocolDecoder for ServerDecoder {
                     ServerIncoming::Batch { batch_type, count } => match batch_type {
                         BatchType::Start => {
                             self.in_batch = true;
-                            result = Ok(Some(ClientMessage::IncomingBatch));
+                            result = Ok(Some(ClientToServer::Batch));
                         }
                         BatchType::End => {
                             self.in_batch = false;
-                            result = Ok(Some(ClientMessage::PublishMessage {
+                            result = Ok(Some(ClientToServer::PublishMessage {
                                 message: Message {
                                     message_type: MessageType::BatchEnd {
                                         count: self.batch_count,
@@ -231,7 +231,7 @@ impl ProtocolDecoder for ServerDecoder {
                             self.in_batch = true;
                             self.batch_count = 0;
                             self.expected_batch_count = count;
-                            result = Ok(Some(ClientMessage::IncomingBatchCount { count }));
+                            result = Ok(Some(ClientToServer::BatchCount { count }));
                         }
                     },
 
@@ -239,7 +239,7 @@ impl ProtocolDecoder for ServerDecoder {
                         client_name,
                         group_id,
                     } => {
-                        result = Ok(Some(ClientMessage::Connect {
+                        result = Ok(Some(ClientToServer::Connect {
                             client_name,
                             group_id,
                         }));
@@ -252,7 +252,7 @@ impl ProtocolDecoder for ServerDecoder {
                         sub_type,
                     } => {
                         let new_pos = position.to_position(offset);
-                        result = Ok(Some(ClientMessage::Subscribe {
+                        result = Ok(Some(ClientToServer::Subscribe {
                             topic,
                             partition,
                             position: new_pos,
@@ -260,12 +260,12 @@ impl ProtocolDecoder for ServerDecoder {
                         }));
                     }
                     ServerIncoming::Unsubscribe { topic, partition } => {
-                        result = Ok(Some(ClientMessage::Unsubscribe { topic, partition }));
+                        result = Ok(Some(ClientToServer::Unsubscribe { topic, partition }));
                     }
                     ServerIncoming::Status { status } => {
                         result = match status.as_str() {
-                            "close" => Ok(Some(ClientMessage::ClientDisconnect)),
-                            "ok" => Ok(Some(ClientMessage::StatusOk)),
+                            "close" => Ok(Some(ClientToServer::ClientDisconnect)),
+                            "ok" => Ok(Some(ClientToServer::StatusOk)),
                             _ => {
                                 let mes = format!("Invalid status from client: {}!", status);
                                 error!("{}", mes);
@@ -278,7 +278,7 @@ impl ProtocolDecoder for ServerDecoder {
                         partition,
                         commit_offset,
                     } => {
-                        result = Ok(Some(ClientMessage::Commit {
+                        result = Ok(Some(ClientToServer::Commit {
                             topic,
                             partition,
                             commit_offset,
@@ -291,7 +291,7 @@ impl ProtocolDecoder for ServerDecoder {
                         offset,
                     } => {
                         let new_pos = position.to_position(offset);
-                        result = Ok(Some(ClientMessage::Fetch {
+                        result = Ok(Some(ClientToServer::Fetch {
                             topic,
                             partition,
                             position: new_pos,
@@ -306,13 +306,81 @@ impl ProtocolDecoder for ServerDecoder {
                 message.payload = buf[..message.payload_size].to_vec();
                 buf.advance(message.payload_size);
                 self.message = None;
-                result = Ok(Some(ClientMessage::PublishMessage { message }));
+                result = Ok(Some(ClientToServer::PublishMessage { message }));
             } else {
                 result = Ok(None);
             }
         }
 
         result
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ServerEncoder;
+
+impl ProtocolServerEncoder for ServerEncoder {
+    fn encode(&mut self, buf: &mut BytesMut, message: ServerToClient) -> EncodeStatus {
+        match message {
+            ServerToClient::StatusOk => {
+                let v = "{\"Status\":{\"status\":\"OK\"}}";
+                let bytes = v.as_bytes();
+                move_bytes(buf, bytes)
+            }
+            ServerToClient::StatusOkCount { count } => {
+                let v = format!("{{\"Status\":{{\"status\":\"OK\",\"count\":{}}}}}", count);
+                let bytes = v.as_bytes();
+                move_bytes(buf, bytes)
+            }
+            ServerToClient::StatusError { code, message } => {
+                let v = format!(
+                    "{{\"Status\":{{\"status\":\"ERROR\",\"code\":{},\"message\":\"{}\"}}}}",
+                    code, message
+                );
+                let bytes = v.as_bytes();
+                move_bytes(buf, bytes)
+            }
+            ServerToClient::CommitAck {
+                topic,
+                partition,
+                offset,
+            } => {
+                let v = format!(
+                    "{{\"CommitAck\":{{\"topic\":\"{}\",\"partition\":{},\"offset\":{}}}}}",
+                    topic, partition, offset
+                );
+                let bytes = v.as_bytes();
+                move_bytes(buf, bytes)
+            }
+            ServerToClient::Message { message } => {
+                let v = format!("{{\"Message\":{{\"topic\":\"{}\",\"payload_size\":{},\"crc\":{},\"sequence\":{}}}}}",
+                                   message.topic, message.payload_size, message.crc, message.sequence);
+                let bytes = v.as_bytes();
+                if (bytes.len() + message.payload_size) > buf.remaining_mut() {
+                    let mut new_bytes = BytesMut::with_capacity(bytes.len() + message.payload_size);
+                    new_bytes.put_slice(bytes);
+                    new_bytes.put_slice(&message.payload);
+                    EncodeStatus::BufferToSmall(new_bytes.freeze())
+                } else {
+                    buf.put_slice(bytes);
+                    buf.put_slice(&message.payload);
+                    EncodeStatus::Ok
+                }
+            }
+            ServerToClient::MessagesAvailable { topic, partition } => {
+                let v = format!(
+                    "{{\"MessagesAvailable\": {{\"topic\": \"{}\", \"partition\": {}}}}}",
+                    topic, partition
+                );
+                let bytes = v.as_bytes();
+                move_bytes(buf, bytes)
+            }
+
+            ServerToClient::InternalMessage { .. } => EncodeStatus::Invalid,
+            ServerToClient::MessageBatch { .. } => EncodeStatus::Invalid,
+            ServerToClient::Over => EncodeStatus::Invalid,
+            ServerToClient::Noop => EncodeStatus::Invalid,
+        }
     }
 }
 
@@ -366,8 +434,8 @@ impl ClientDecoder {
     }
 }
 
-impl ProtocolDecoder for ClientDecoder {
-    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<ClientMessage>> {
+impl ProtocolClientDecoder for ClientDecoder {
+    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<ServerToClient>> {
         let mut result = Ok(None);
         if self.message.is_none() {
             if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
@@ -404,13 +472,13 @@ impl ProtocolDecoder for ClientDecoder {
                         result = match status {
                             StatusType::OK => {
                                 if count > 0 {
-                                    Ok(Some(ClientMessage::StatusOkCount { count }))
+                                    Ok(Some(ServerToClient::StatusOkCount { count }))
                                 } else {
-                                    Ok(Some(ClientMessage::StatusOk))
+                                    Ok(Some(ServerToClient::StatusOk))
                                 }
                             }
                             StatusType::Error => {
-                                Ok(Some(ClientMessage::StatusError { code, message }))
+                                Ok(Some(ServerToClient::StatusError { code, message }))
                             }
                         }
                     }
@@ -419,14 +487,14 @@ impl ProtocolDecoder for ClientDecoder {
                         partition,
                         offset,
                     } => {
-                        result = Ok(Some(ClientMessage::CommitAck {
+                        result = Ok(Some(ServerToClient::CommitAck {
                             topic,
                             partition,
                             offset,
                         }))
                     }
                     ClientIncoming::MessagesAvailable { topic, partition } => {
-                        result = Ok(Some(ClientMessage::MessagesAvailable { topic, partition }))
+                        result = Ok(Some(ServerToClient::MessagesAvailable { topic, partition }))
                     }
                 }
             }
@@ -438,7 +506,7 @@ impl ProtocolDecoder for ClientDecoder {
                 message.payload = buf[..message.payload_size].to_vec();
                 buf.advance(message.payload_size);
                 got_payload = true;
-                result = Ok(Some(ClientMessage::Message { message }));
+                result = Ok(Some(ServerToClient::Message { message }));
             } else {
                 result = Ok(None);
             }
@@ -451,59 +519,18 @@ impl ProtocolDecoder for ClientDecoder {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct Encoder;
+pub struct ClientEncoder;
 
-impl ProtocolEncoder for Encoder {
-    fn encode(&mut self, buf: &mut BytesMut, message: ClientMessage) -> EncodeStatus {
+impl ProtocolClientEncoder for ClientEncoder {
+    fn encode(&mut self, buf: &mut BytesMut, message: ClientToServer) -> EncodeStatus {
         match message {
-            ClientMessage::StatusOk => {
+            ClientToServer::StatusOk => {
                 let v = "{\"Status\":{\"status\":\"OK\"}}";
                 let bytes = v.as_bytes();
                 move_bytes(buf, bytes)
             }
-            ClientMessage::StatusOkCount { count } => {
-                let v = format!("{{\"Status\":{{\"status\":\"OK\",\"count\":{}}}}}", count);
-                let bytes = v.as_bytes();
-                move_bytes(buf, bytes)
-            }
-            ClientMessage::StatusError { code, message } => {
-                let v = format!(
-                    "{{\"Status\":{{\"status\":\"ERROR\",\"code\":{},\"message\":\"{}\"}}}}",
-                    code, message
-                );
-                let bytes = v.as_bytes();
-                move_bytes(buf, bytes)
-            }
-            ClientMessage::CommitAck {
-                topic,
-                partition,
-                offset,
-            } => {
-                let v = format!(
-                    "{{\"CommitAck\":{{\"topic\":\"{}\",\"partition\":{},\"offset\":{}}}}}",
-                    topic, partition, offset
-                );
-                let bytes = v.as_bytes();
-                move_bytes(buf, bytes)
-            }
-            ClientMessage::Message { message } => {
-                let v = format!("{{\"Message\":{{\"topic\":\"{}\",\"payload_size\":{},\"crc\":{},\"sequence\":{}}}}}",
-                                   message.topic, message.payload_size, message.crc, message.sequence);
-                let bytes = v.as_bytes();
-                if (bytes.len() + message.payload_size) > buf.remaining_mut() {
-                    let mut new_bytes = BytesMut::with_capacity(bytes.len() + message.payload_size);
-                    new_bytes.put_slice(bytes);
-                    new_bytes.put_slice(&message.payload);
-                    EncodeStatus::BufferToSmall(new_bytes.freeze())
-                } else {
-                    buf.put_slice(bytes);
-                    buf.put_slice(&message.payload);
-                    EncodeStatus::Ok
-                }
-            }
-
             // Client encodings.
-            ClientMessage::Commit {
+            ClientToServer::Commit {
                 topic,
                 partition,
                 commit_offset,
@@ -515,7 +542,7 @@ impl ProtocolEncoder for Encoder {
                 let bytes = v.as_bytes();
                 move_bytes(buf, bytes)
             }
-            ClientMessage::Connect {
+            ClientToServer::Connect {
                 client_name,
                 group_id,
             } => {
@@ -526,7 +553,7 @@ impl ProtocolEncoder for Encoder {
                 let bytes = v.as_bytes();
                 move_bytes(buf, bytes)
             }
-            ClientMessage::Subscribe {
+            ClientToServer::Subscribe {
                 topic,
                 partition,
                 position: TopicPosition::Offset { offset },
@@ -539,7 +566,7 @@ impl ProtocolEncoder for Encoder {
                 let bytes = v.as_bytes();
                 move_bytes(buf, bytes)
             }
-            ClientMessage::Subscribe {
+            ClientToServer::Subscribe {
                 topic,
                 partition,
                 position,
@@ -552,7 +579,7 @@ impl ProtocolEncoder for Encoder {
                 let bytes = v.as_bytes();
                 move_bytes(buf, bytes)
             }
-            ClientMessage::Unsubscribe { topic, partition } => {
+            ClientToServer::Unsubscribe { topic, partition } => {
                 let v = format!(
                     "{{\"Unsubscribe\": {{\"topic\": \"{}\", \"partition\": {}}}}}",
                     topic, partition
@@ -560,7 +587,7 @@ impl ProtocolEncoder for Encoder {
                 let bytes = v.as_bytes();
                 move_bytes(buf, bytes)
             }
-            ClientMessage::PublishBatchStart { count } => {
+            ClientToServer::PublishBatchStart { count } => {
                 let v = format!(
                     "{{\"Batch\": {{\"batch_type\": \"Count\", \"count\": {}}}}}",
                     count
@@ -568,7 +595,7 @@ impl ProtocolEncoder for Encoder {
                 let bytes = v.as_bytes();
                 move_bytes(buf, bytes)
             }
-            ClientMessage::PublishMessage { message } => {
+            ClientToServer::PublishMessage { message } => {
                 let v = format!(
                     "{{\"Publish\": {{\"topic\": \"{}\", \"partition\": {}, \"payload_size\": {}, \"crc\": {}}}}}",
                     message.topic, message.partition, message.payload_size, message.crc
@@ -585,15 +612,7 @@ impl ProtocolEncoder for Encoder {
                     EncodeStatus::Ok
                 }
             }
-            ClientMessage::MessagesAvailable { topic, partition } => {
-                let v = format!(
-                    "{{\"MessagesAvailable\": {{\"topic\": \"{}\", \"partition\": {}}}}}",
-                    topic, partition
-                );
-                let bytes = v.as_bytes();
-                move_bytes(buf, bytes)
-            }
-            ClientMessage::Fetch {
+            ClientToServer::Fetch {
                 topic,
                 partition,
                 position: TopicPosition::Offset { offset },
@@ -605,7 +624,7 @@ impl ProtocolEncoder for Encoder {
                 let bytes = v.as_bytes();
                 move_bytes(buf, bytes)
             }
-            ClientMessage::Fetch {
+            ClientToServer::Fetch {
                 topic,
                 partition,
                 position,
@@ -617,25 +636,26 @@ impl ProtocolEncoder for Encoder {
                 let bytes = v.as_bytes();
                 move_bytes(buf, bytes)
             }
-            ClientMessage::InternalMessage { .. } => EncodeStatus::Invalid,
-            ClientMessage::MessageBatch { .. } => EncodeStatus::Invalid,
-            ClientMessage::Over => EncodeStatus::Invalid,
-            ClientMessage::ClientDisconnect => EncodeStatus::Invalid,
-            ClientMessage::IncomingBatch => EncodeStatus::Invalid,
-            ClientMessage::IncomingBatchCount { .. } => EncodeStatus::Invalid,
-            ClientMessage::Noop => EncodeStatus::Invalid,
+            ClientToServer::ClientDisconnect => EncodeStatus::Invalid,
+            ClientToServer::Batch => EncodeStatus::Invalid,
+            ClientToServer::BatchCount { .. } => EncodeStatus::Invalid,
+            ClientToServer::Noop => EncodeStatus::Invalid,
         }
     }
 }
 
-pub fn decoder_factory() -> Box<dyn ProtocolDecoder> {
+pub fn decoder_factory() -> Box<dyn ProtocolServerDecoder> {
     Box::new(ServerDecoder::default())
 }
 
-pub fn client_decoder_factory() -> Box<dyn ProtocolDecoder> {
+pub fn client_decoder_factory() -> Box<dyn ProtocolClientDecoder> {
     Box::new(ClientDecoder::new())
 }
 
-pub fn encoder_factory() -> Box<dyn ProtocolEncoder> {
-    Box::new(Encoder {})
+pub fn encoder_factory() -> Box<dyn ProtocolServerEncoder> {
+    Box::new(ServerEncoder {})
+}
+
+pub fn client_encoder_factory() -> Box<dyn ProtocolClientEncoder> {
+    Box::new(ClientEncoder {})
 }

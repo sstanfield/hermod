@@ -73,38 +73,14 @@ impl fmt::Display for SubType {
     }
 }
 
-/// This is the internal representation of data coming or going from a client.
+/// This is the internal representation of data coming from a client to server.
 #[derive(Clone)]
-pub enum ClientMessage {
+pub enum ClientToServer {
     StatusOk,
-    StatusOkCount {
+    BatchCount {
         count: usize,
     },
-    CommitAck {
-        topic: String,
-        partition: u64,
-        offset: u64,
-    },
-    StatusError {
-        code: u32,
-        message: String,
-    },
-    IncomingBatchCount {
-        count: usize,
-    },
-    IncomingBatch,
-    Message {
-        message: Message,
-    },
-    InternalMessage {
-        message: Message,
-    },
-    MessageBatch {
-        file_name: String,
-        start: u64,
-        length: u64,
-    },
-    Over,
+    Batch,
     Connect {
         client_name: String,
         group_id: String,
@@ -136,11 +112,48 @@ pub enum ClientMessage {
         partition: u64,
         position: TopicPosition,
     },
+    Noop,
+}
+
+/// This is the internal representation of data going from a server to a client.
+#[derive(Clone)]
+pub enum ServerToClient {
+    StatusOk,
+    StatusOkCount {
+        count: usize,
+    },
+    CommitAck {
+        topic: String,
+        partition: u64,
+        offset: u64,
+    },
+    StatusError {
+        code: u32,
+        message: String,
+    },
+    InternalMessage {
+        message: Message,
+    },
+    Message {
+        message: Message,
+    },
+    MessageBatch {
+        file_name: String,
+        start: u64,
+        length: u64,
+    },
+    Over,
     MessagesAvailable {
         topic: String,
         partition: u64,
     },
     Noop,
+}
+
+#[derive(Clone)]
+pub enum ClientMessage {
+    ToClient(ServerToClient),
+    ToServer(ClientToServer),
 }
 
 /// A topic/partition pair.
@@ -161,18 +174,34 @@ pub enum EncodeStatus {
     Invalid,
 }
 
-/// Trait to implement a decoder for data recieved over network.
-pub trait ProtocolDecoder: Send {
-    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<ClientMessage>>;
+/// Trait to implement a decoder for data recieved by server.
+pub trait ProtocolServerDecoder: Send {
+    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<ClientToServer>>;
 }
 
 /// Trait to implement encoding data to send to a client.
-pub trait ProtocolEncoder: Send {
-    fn encode(&mut self, buf: &mut BytesMut, message: ClientMessage) -> EncodeStatus;
+pub trait ProtocolServerEncoder: Send {
+    fn encode(&mut self, buf: &mut BytesMut, message: ServerToClient) -> EncodeStatus;
 }
 
-/// Function prototype for a decoder factory.
-pub type ProtocolDecoderFactory = fn() -> Box<dyn ProtocolDecoder>;
+/// Trait to implement a decoder for data recieved by server.
+pub trait ProtocolClientDecoder: Send {
+    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<ServerToClient>>;
+}
 
-/// Function prototype for an encoder factory.
-pub type ProtocolEncoderFactory = fn() -> Box<dyn ProtocolEncoder>;
+/// Trait to implement encoding data to send to a client.
+pub trait ProtocolClientEncoder: Send {
+    fn encode(&mut self, buf: &mut BytesMut, message: ClientToServer) -> EncodeStatus;
+}
+
+/// Function prototype for a server decoder factory.
+pub type ProtocolServerDecoderFactory = fn() -> Box<dyn ProtocolServerDecoder>;
+
+/// Function prototype for a server encoder factory.
+pub type ProtocolServerEncoderFactory = fn() -> Box<dyn ProtocolServerEncoder>;
+
+/// Function prototype for a client decoder factory.
+pub type ProtocolClientDecoderFactory = fn() -> Box<dyn ProtocolClientDecoder>;
+
+/// Function prototype for a client encoder factory.
+pub type ProtocolClientEncoderFactory = fn() -> Box<dyn ProtocolClientEncoder>;

@@ -152,7 +152,7 @@ fn main() -> io::Result<()> {
                 config.name.clone(),
                 config.group.clone(),
                 client_decoder_factory,
-                encoder_factory,
+                client_encoder_factory,
             )
             .await
             .unwrap();
