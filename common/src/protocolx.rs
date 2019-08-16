@@ -208,7 +208,7 @@ impl ProtocolDecoder for ServerDecoder {
                     ServerIncoming::Batch { batch_type, count } => match batch_type {
                         BatchType::Start => {
                             self.in_batch = true;
-                            result = Ok(Some(ClientMessage::Noop));
+                            result = Ok(Some(ClientMessage::IncomingBatch));
                         }
                         BatchType::End => {
                             self.in_batch = false;
@@ -231,7 +231,7 @@ impl ProtocolDecoder for ServerDecoder {
                             self.in_batch = true;
                             self.batch_count = 0;
                             self.expected_batch_count = count;
-                            result = Ok(Some(ClientMessage::Noop));
+                            result = Ok(Some(ClientMessage::IncomingBatchCount { count }));
                         }
                     },
 
@@ -621,6 +621,8 @@ impl ProtocolEncoder for Encoder {
             ClientMessage::MessageBatch { .. } => EncodeStatus::Invalid,
             ClientMessage::Over => EncodeStatus::Invalid,
             ClientMessage::ClientDisconnect => EncodeStatus::Invalid,
+            ClientMessage::IncomingBatch => EncodeStatus::Invalid,
+            ClientMessage::IncomingBatchCount { .. } => EncodeStatus::Invalid,
             ClientMessage::Noop => EncodeStatus::Invalid,
         }
     }

@@ -31,6 +31,7 @@ pub struct MessageCore {
     client_encoder: Box<dyn ProtocolEncoder>,
     writer: WriteHalf<TcpStream>,
     out_bytes: BytesMut,
+    message_batch: Option<Vec<Message>>,
 }
 
 impl MessageCore {
@@ -58,6 +59,7 @@ impl MessageCore {
             client_encoder,
             writer,
             out_bytes,
+            message_batch: None,
         }
     }
 
@@ -264,22 +266,40 @@ impl MessageCore {
                 topic: message.topic.clone(),
             };
             let message_type = message.message_type;
-            if message.payload_size > 0 {
-                if let Ok(mut tx) = self.get_broker_tx(tp).await {
-                    if let Err(error) = tx.send(BrokerMessage::Message { message }).await {
-                        error!("Error sending to broker: {}", error);
-                        self.running = false;
-                    }
-                }
-            }
             match message_type {
                 MessageType::Message => {
+                    if message.payload_size > 0 {
+                        if let Ok(mut tx) = self.get_broker_tx(tp).await {
+                            if let Err(error) = tx.send(BrokerMessage::Message { message }).await {
+                                error!("Error sending to broker: {}", error);
+                                self.running = false;
+                            }
+                        }
+                    }
                     self.send(ClientMessage::StatusOk).await;
                 }
                 MessageType::BatchMessage => {
                     // No feedback during a batch.
+                    if let Some(message_batch) = &mut self.message_batch {
+                        message_batch.push(message);
+                    }
                 }
                 MessageType::BatchEnd { count } => {
+                    let message_batch = std::mem::replace(&mut self.message_batch, None);
+                    if let Some(mut message_batch) = message_batch {
+                        message_batch.push(message);
+                        if let Ok(mut tx) = self.get_broker_tx(tp).await {
+                            if let Err(error) = tx
+                                .send(BrokerMessage::MessageBatch {
+                                    messages: message_batch,
+                                })
+                                .await
+                            {
+                                error!("Error sending to broker: {}", error);
+                                self.running = false;
+                            }
+                        }
+                    }
                     self.send(ClientMessage::StatusOkCount { count }).await;
                 }
             }
@@ -310,6 +330,12 @@ impl MessageCore {
             }
             ClientMessage::InternalMessage { .. } => {
                 //println!("XXXX internal {}: {}", message.topic, std::str::from_utf8(&message.payload[..]).unwrap());
+            }
+            ClientMessage::IncomingBatch => {
+                self.message_batch = Some(Vec::with_capacity(100));
+            }
+            ClientMessage::IncomingBatchCount { count } => {
+                self.message_batch = Some(Vec::with_capacity(count));
             }
             ClientMessage::Message { message } => {
                 self.send(ClientMessage::Message { message }).await;

@@ -38,6 +38,9 @@ pub enum BrokerMessage {
     Message {
         message: Message,
     },
+    MessageBatch {
+        messages: Vec<Message>,
+    },
     NewClient {
         client_name: String,
         group_id: String,
@@ -390,6 +393,11 @@ async fn new_message_broker(
         match mes {
             BrokerMessage::Message { message } => {
                 handle_message(message, &tp, &mut msg_log, &mut client_tx);
+            }
+            BrokerMessage::MessageBatch { messages } => {
+                for message in messages {
+                    handle_message(message, &tp, &mut msg_log, &mut client_tx);
+                }
             }
             BrokerMessage::NewClient {
                 client_name,

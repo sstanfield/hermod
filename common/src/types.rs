@@ -89,6 +89,10 @@ pub enum ClientMessage {
         code: u32,
         message: String,
     },
+    IncomingBatchCount {
+        count: usize,
+    },
+    IncomingBatch,
     Message {
         message: Message,
     },
