@@ -34,6 +34,20 @@ if [[ $? -ne 0 ]]; then
     echo "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
 fi
 
+target/release/test_client --name test3_consume_test3 --group test3 --topic test_top3 --consume --count 1000000 &
+pid=`pgrep test_client`
+for n in {0..100}; do
+    target/release/test_client --base_message LOTSCLIENT_${n} --name test3_publish${n}_test3 --group test3 --topic test_top3 --publish --count 10000 &
+    #echo $n ;
+done
+
+wait $pid
+if [[ $? -ne 0 ]]; then
+    echo "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+    echo "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX FAIL XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+    echo "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+fi
+
 kill $hermod_pid
 wait $hermod_pid
 
