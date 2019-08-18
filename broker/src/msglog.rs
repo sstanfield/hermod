@@ -1,17 +1,18 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::time::SystemTime;
 
-use log::error;
+use log::{error, info};
 
 use serde_json;
 
 use common::types::*;
 use common::util::*;
 
-pub struct LogIndex {
+struct LogIndex {
     pub offset: u64,
     pub time: u128,
     pub position: u64,
@@ -41,6 +42,12 @@ impl LogIndex {
     }
 }
 
+pub struct MessageChunk {
+    pub file_name: String,
+    pub start_position: u64,
+    pub length: u64,
+}
+
 #[derive(Deserialize)]
 enum MessageFromLog {
     Message {
@@ -61,11 +68,13 @@ pub struct MessageLog {
     log_flushed_end: u64,
     offset: u64,
     single_record: bool,
+    topic: String,
     partition: u64,
+    base_dir: String,
 }
 
 impl MessageLog {
-    pub fn new(tp: &TopicPartition, single_record: bool, log_dir: &str) -> io::Result<MessageLog> {
+    fn new(tp: &TopicPartition, single_record: bool, log_dir: &str) -> io::Result<MessageLog> {
         let log_file_name = format!("{}/{}.{}.log", log_dir, tp.topic, tp.partition);
         let mut log_append = OpenOptions::new()
             .read(false)
@@ -108,7 +117,9 @@ impl MessageLog {
             log_flushed_end,
             offset,
             single_record,
+            topic: tp.topic.clone(),
             partition: tp.partition,
+            base_dir: log_dir.to_string(),
         })
     }
 
@@ -158,7 +169,7 @@ impl MessageLog {
         Ok(())
     }
 
-    pub fn get_index(&self, offset: u64) -> io::Result<LogIndex> {
+    fn get_index(&self, offset: u64) -> io::Result<LogIndex> {
         let pos = offset * std::mem::size_of::<LogIndex>() as u64;
         let mut idx_read = File::open(&self.log_file_idx_name)?;
         idx_read.seek(SeekFrom::Start(pos))?;
@@ -167,6 +178,26 @@ impl MessageLog {
             idx_read.read_exact(idx.as_bytes_mut())?;
         }
         Ok(idx)
+    }
+
+    pub fn get_all_message_chunks(&self, start_offset: u64) -> Option<Vec<MessageChunk>> {
+        let index = self.get_index(start_offset);
+
+        match index {
+            Ok(index) => {
+                let mut result = Vec::with_capacity(1);
+                result.push(MessageChunk {
+                    file_name: self.log_file_name.clone(),
+                    start_position: index.position,
+                    length: self.log_flushed_end - index.position,
+                });
+                Some(result)
+            }
+            Err(error) => {
+                info!("Unable to get message chunks: {}.", error);
+                None
+            }
+        }
     }
 
     pub fn get_message(&mut self, offset: u64) -> io::Result<Message> {
@@ -234,10 +265,51 @@ impl MessageLog {
     pub fn offset(&self) -> u64 {
         self.offset
     }
-    pub fn log_file_name(&self) -> String {
-        self.log_file_name.clone()
+
+    pub fn get_committed_offset(&self, group_id: &str) -> io::Result<u64> {
+        #[derive(Deserialize)]
+        struct OffsetRecord {
+            offset: u64,
+        }
+
+        let commit_topic = format!(
+            "__consumer_offsets-{}-{}-{}",
+            group_id, self.topic, self.partition
+        );
+        let tp_offset = TopicPartition {
+            topic: commit_topic,
+            partition: self.partition,
+        };
+        let mut offset_log = MessageLog::new(&tp_offset, true, &self.base_dir)?;
+        let offset_message = offset_log.get_message(0)?;
+        let record: OffsetRecord = serde_json::from_slice(&offset_message.payload[..]).unwrap(); // XXX TODO Don't unwrap...
+        Ok(record.offset)
     }
-    pub fn log_file_end(&self) -> u64 {
-        self.log_flushed_end
+}
+
+pub struct MessageLogManager {
+    logs: HashMap<TopicPartition, bool>,
+    base_dir: String,
+}
+
+impl MessageLogManager {
+    pub fn new(base_dir: &str) -> MessageLogManager {
+        MessageLogManager {
+            logs: HashMap::new(),
+            base_dir: base_dir.to_string(),
+        }
+    }
+
+    pub fn get_log_manager(
+        &mut self,
+        tp: &TopicPartition,
+        single_record: bool,
+    ) -> io::Result<MessageLog> {
+        //if logs.contains_key(&tp) {
+        // If it is in use this a critical error...
+        //}
+        let msg_log = MessageLog::new(tp, single_record, &self.base_dir)?;
+        self.logs.insert(tp.clone(), true);
+        Ok(msg_log)
     }
 }

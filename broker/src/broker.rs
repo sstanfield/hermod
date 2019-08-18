@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::io;
 use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
@@ -17,13 +18,6 @@ use common::util::*;
 
 use crc::{crc32, Hasher32};
 use log::{error, info};
-
-use serde_json;
-
-#[derive(Deserialize)]
-struct OffsetRecord {
-    offset: u64,
-}
 
 struct ClientInfo {
     tx: mpsc::Sender<ClientMessage>,
@@ -67,47 +61,51 @@ struct BrokerData {
     threadpool: ThreadPool,
     topic_online_tx: mpsc::Sender<BrokerMessage>,
     is_shutdown: bool,
+    log_manager: MessageLogManager,
 }
 
 pub struct BrokerManager {
     brokers: Mutex<BrokerData>,
     count: Arc<Mutex<usize>>,
-    log_dir: String,
 }
 
 impl BrokerManager {
-    pub fn new(mut threadpool: ThreadPool, log_dir: &str) -> BrokerManager {
+    pub fn new(mut threadpool: ThreadPool, log_dir: &str) -> io::Result<BrokerManager> {
         let log_dir = log_dir.to_string();
         let tp = TopicPartition {
             topic: "__topic_online".to_string(),
             partition: 0,
         };
+        let mut log_manager = MessageLogManager::new(&log_dir);
         let count = Arc::new(Mutex::new(0));
         let (topic_online_tx, rx) = mpsc::channel::<BrokerMessage>(1000);
         //let (topic_online_tx, rx) = mpsc::unbounded::<BrokerMessage>();
+        let msg_online = log_manager.get_log_manager(&tp, false)?;
         if let Err(err) = threadpool.spawn(new_message_broker(
             rx,
             tp.clone(),
-            log_dir.clone(),
+            msg_online,
             count.clone(),
         )) {
-            error!(
+            let msg = format!(
                 "Got error spawning task for partion {}, topic {}, error: {}",
                 tp.partition, tp.topic, err
             );
+            error!("{}", msg);
+            return Err(io::Error::new(io::ErrorKind::Other, msg));
         }
         let mut hm = HashMap::new();
         hm.insert(tp, topic_online_tx.clone());
-        BrokerManager {
+        Ok(BrokerManager {
             brokers: Mutex::new(BrokerData {
                 brokers: hm,
                 threadpool,
                 topic_online_tx,
                 is_shutdown: false,
+                log_manager,
             }),
             count,
-            log_dir,
-        }
+        })
     }
 
     pub async fn expand_topics(&self, topic_name: String) -> Vec<String> {
@@ -151,44 +149,58 @@ impl BrokerManager {
         }
         let (tx, rx) = mpsc::channel::<BrokerMessage>(1000);
         data.brokers.insert(tp.clone(), tx.clone());
-        if let Err(err) = data.threadpool.spawn(new_message_broker(
-            rx,
-            tp.clone(),
-            self.log_dir.clone(),
-            self.count.clone(),
-        )) {
-            error!(
-                "Got error spawning task for partion {}, topic {}, error: {}",
-                partition, topic, err
-            );
-            Err(())
-        } else {
-            let payload = format!(
-                "{{\"partition\": {}, \"topic\": \"{}\"}}",
-                tp.partition, tp.topic
-            )
-            .into_bytes();
-            let mut digest = crc32::Digest::new(crc32::IEEE);
-            digest.write(&payload);
-            let crc = digest.sum32();
-            let message = Message {
-                message_type: MessageType::Message,
-                topic: "__topic_online".to_string(),
-                partition: 0,
-                payload_size: payload.len(),
-                crc,
-                sequence: 0,
-                payload,
-            };
-            if let Err(error) = data
-                .topic_online_tx
-                .send(BrokerMessage::Message { message })
-                .await
-            {
-                error!("Error sending to broker: {}", error);
-            }
+        match data
+            .log_manager
+            .get_log_manager(&tp, tp.topic.starts_with("__consumer_offsets"))
+        {
+            Ok(msg_log) => {
+                if let Err(err) = data.threadpool.spawn(new_message_broker(
+                    rx,
+                    tp.clone(),
+                    msg_log,
+                    self.count.clone(),
+                )) {
+                    error!(
+                        "Got error spawning task for partion {}, topic {}, error: {}",
+                        partition, topic, err
+                    );
+                    Err(())
+                } else {
+                    let payload = format!(
+                        "{{\"partition\": {}, \"topic\": \"{}\"}}",
+                        tp.partition, tp.topic
+                    )
+                    .into_bytes();
+                    let mut digest = crc32::Digest::new(crc32::IEEE);
+                    digest.write(&payload);
+                    let crc = digest.sum32();
+                    let message = Message {
+                        message_type: MessageType::Message,
+                        topic: "__topic_online".to_string(),
+                        partition: 0,
+                        payload_size: payload.len(),
+                        crc,
+                        sequence: 0,
+                        payload,
+                    };
+                    if let Err(error) = data
+                        .topic_online_tx
+                        .send(BrokerMessage::Message { message })
+                        .await
+                    {
+                        error!("Error sending to broker: {}", error);
+                    }
 
-            Ok(tx.clone())
+                    Ok(tx.clone())
+                }
+            }
+            Err(err) => {
+                error!(
+                    "Got error creating message log for partion {}, topic {}, error: {}",
+                    partition, topic, err
+                );
+                Err(())
+            }
         }
     }
 
@@ -241,32 +253,31 @@ fn fetch(
     client_name: &str,
 ) -> bool {
     let mut success = true;
-    let info = msg_log.get_index(offset);
-    if let Ok(info) = info {
-        if let Err(error) =
-            client_tx.try_send(ClientMessage::ToClient(ServerToClient::MessageBatch {
-                file_name: msg_log.log_file_name(),
-                start: info.position,
-                length: msg_log.log_file_end() - info.position,
-            }))
-        {
-            success = false;
-            error!(
-                "Error fetching ({}) for client {}, dropping: {}",
-                offset, client_name, error
-            );
+    if let Some(chunks) = msg_log.get_all_message_chunks(offset) {
+        for chunk in chunks {
+            if let Err(error) =
+                client_tx.try_send(ClientMessage::ToClient(ServerToClient::MessageBatch {
+                    file_name: chunk.file_name,
+                    start: chunk.start_position,
+                    length: chunk.length,
+                }))
+            {
+                success = false;
+                error!(
+                    "Error fetching ({}) for client {}, dropping: {}",
+                    offset, client_name, error
+                );
+            }
         }
     }
     success
 }
 
 fn fetch_with_pos(
-    tp: &TopicPartition,
     msg_log: &MessageLog,
     client: &mut ClientInfo,
     client_name: &str,
     position: TopicPosition,
-    log_dir: &str,
 ) -> bool {
     let mut bad_client = false;
     match position {
@@ -274,36 +285,18 @@ fn fetch_with_pos(
             bad_client = !fetch(0, &msg_log, &mut client.tx, &client_name);
         }
         TopicPosition::Latest => {}
-        TopicPosition::Current => {
-            let commit_topic = format!(
-                "__consumer_offsets-{}-{}-{}",
-                client.group_id, tp.topic, tp.partition
-            );
-            let tp_offset = TopicPartition {
-                topic: commit_topic,
-                partition: tp.partition,
-            };
-            let offset_log = MessageLog::new(&tp_offset, true, log_dir);
-            if let Ok(mut offset_log) = offset_log {
-                let offset_message = offset_log.get_message(0);
-                if let Ok(offset_message) = offset_message {
-                    let record: OffsetRecord =
-                        serde_json::from_slice(&offset_message.payload[..]).unwrap(); // XXX TODO Don't unwrap...
-                    bad_client = !fetch(record.offset + 1, &msg_log, &mut client.tx, &client_name);
-                } else {
-                    info!(
-                        "Issue retrieving consumer offset (probably not committed): {}, using 0.",
-                        offset_message.unwrap_err()
-                    );
-                    bad_client = !fetch(0, &msg_log, &mut client.tx, &client_name);
-                }
-            } else {
-                error!(
-                    "Error retrieving consumer offset log: {}",
-                    offset_log.unwrap_err()
-                );
+        TopicPosition::Current => match msg_log.get_committed_offset(&client.group_id) {
+            Ok(offset) => {
+                bad_client = !fetch(offset + 1, &msg_log, &mut client.tx, &client_name);
             }
-        }
+            Err(err) => {
+                info!(
+                    "Issue retrieving consumer offset (probably not committed): {}, using 0.",
+                    err
+                );
+                bad_client = !fetch(0, &msg_log, &mut client.tx, &client_name);
+            }
+        },
         TopicPosition::Offset { offset } => {
             bad_client = !fetch(offset, &msg_log, &mut client.tx, &client_name);
         }
@@ -369,7 +362,7 @@ fn handle_message(
 async fn new_message_broker(
     mut rx: mpsc::Receiver<BrokerMessage>,
     tp: TopicPartition,
-    log_dir: String,
+    mut msg_log: MessageLog,
     count: Arc<Mutex<usize>>,
 ) {
     info!(
@@ -382,12 +375,6 @@ async fn new_message_broker(
     }
 
     let mut running = true;
-    let msg_log = MessageLog::new(&tp, tp.topic.starts_with("__consumer_offsets"), &log_dir);
-    if let Err(error) = msg_log {
-        error!("Failed to open the message log {}", error);
-        return;
-    }
-    let mut msg_log = msg_log.unwrap();
     let mut client_tx: HashMap<String, ClientInfo> = HashMap::new();
     let mut message = rx.next().await;
     while message.is_some() && running {
@@ -426,8 +413,7 @@ async fn new_message_broker(
                 if let Some(mut client) = client_tx.get_mut(&client_name) {
                     client.sub_type = sub_type;
                     if sub_type == SubType::Stream {
-                        let bad_client =
-                            fetch_with_pos(&tp, &msg_log, client, &client_name, position, &log_dir);
+                        let bad_client = fetch_with_pos(&msg_log, client, &client_name, position);
                         client.needs_fetch.set(false);
                         if bad_client {
                             client_tx.remove(&client_name);
@@ -440,8 +426,7 @@ async fn new_message_broker(
                 position,
             } => {
                 if let Some(client) = client_tx.get_mut(&client_name) {
-                    let bad_client =
-                        fetch_with_pos(&tp, &msg_log, client, &client_name, position, &log_dir);
+                    let bad_client = fetch_with_pos(&msg_log, client, &client_name, position);
                     client.needs_fetch.set(false);
                     if bad_client {
                         client_tx.remove(&client_name);

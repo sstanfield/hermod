@@ -50,7 +50,7 @@ fn main() -> io::Result<()> {
             .name_prefix("hermod Pool")
             .create()?;
         let client_manager = Arc::new(ClientManager::new());
-        let broker_manager = Arc::new(BrokerManager::new(threadpool.clone(), &config.log_dir));
+        let broker_manager = Arc::new(BrokerManager::new(threadpool.clone(), &config.log_dir)?);
 
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<u32>(1);
         let ctrlc_client_manager = client_manager.clone();
