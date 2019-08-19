@@ -2,6 +2,8 @@ use std::env;
 use std::ffi::OsString;
 use std::net::SocketAddr;
 
+use common::types::*;
+
 pub struct Config {
     pub name: String,
     pub group: String,
@@ -12,6 +14,7 @@ pub struct Config {
     pub base_message: String,
     pub fetch: bool,
     pub batch: bool,
+    pub position: TopicPosition,
 }
 
 const VERSION_STRING: &str = env!("VERSION_STRING");
@@ -28,6 +31,7 @@ FLAGS:
     -v, --version  Print the version, platform and revision of client then exit
         --stream   Use stream vs fetch for getting messages
         --no_batch Do not batch messages if publishing
+        --earlest  Get all available messages on topic
 
 OPTIONS:
     -r, --remote <hermod server>  Sets the remote hermod server (server:port).
@@ -64,6 +68,7 @@ pub fn get_config() -> Result<Config, ()> {
     let mut remote: SocketAddr = "127.0.0.1:7878".parse().unwrap();
     let mut fetch = true;
     let mut batch = true;
+    let mut position = TopicPosition::Current;
 
     if let Some(name_os) = env::var_os("HERMOD_CLIENT_REMOTE") {
         if let Ok(r) = name_os.into_string() {
@@ -135,6 +140,9 @@ pub fn get_config() -> Result<Config, ()> {
                     "--no_batch" => {
                         batch = false;
                     }
+                    "--earlest" => {
+                        position = TopicPosition::Earliest;
+                    }
                     "-h" | "--help" => {
                         help(&exe_name);
                         return Err(());
@@ -160,5 +168,6 @@ pub fn get_config() -> Result<Config, ()> {
         base_message,
         fetch,
         batch,
+        position,
     })
 }

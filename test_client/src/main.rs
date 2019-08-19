@@ -41,11 +41,9 @@ async fn run_consumer(client: &mut Client, config: &Config) -> io::Result<()> {
         SubType::Stream
     };
     client
-        .subscribe(&config.topic, TopicPosition::Current, sub_type)
+        .subscribe(&config.topic, config.position, sub_type)
         .await?;
-    client
-        .fetch(&config.topic, 0, TopicPosition::Current)
-        .await?;
+    client.fetch(&config.topic, 0, config.position).await?;
     let mut i = 0;
     let mut start_time: Option<u128> = None;
     loop {

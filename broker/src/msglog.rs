@@ -1,9 +1,13 @@
 use std::collections::HashMap;
+use std::fs::create_dir_all;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::sync::Arc;
 use std::time::SystemTime;
+
+use futures::lock::Mutex;
 
 use log::{error, info};
 
@@ -71,10 +75,18 @@ pub struct MessageLog {
     topic: String,
     partition: u64,
     base_dir: String,
+    log_dir: String,
+    topic_map: Arc<Mutex<HashMap<TopicPartition, u64>>>,
 }
 
 impl MessageLog {
-    fn new(tp: &TopicPartition, single_record: bool, log_dir: &str) -> io::Result<MessageLog> {
+    fn new(
+        tp: &TopicPartition,
+        single_record: bool,
+        base_dir: &str,
+        log_dir: &str,
+        topic_map: Arc<Mutex<HashMap<TopicPartition, u64>>>,
+    ) -> io::Result<MessageLog> {
         let log_file_name = format!("{}/{}.{}.log", log_dir, tp.topic, tp.partition);
         let mut log_append = OpenOptions::new()
             .read(false)
@@ -119,7 +131,9 @@ impl MessageLog {
             single_record,
             topic: tp.topic.clone(),
             partition: tp.partition,
-            base_dir: log_dir.to_string(),
+            base_dir: base_dir.to_string(),
+            log_dir: log_dir.to_string(),
+            topic_map,
         })
     }
 
@@ -266,7 +280,7 @@ impl MessageLog {
         self.offset
     }
 
-    pub fn get_committed_offset(&self, group_id: &str) -> io::Result<u64> {
+    pub async fn get_committed_offset(&self, group_id: &str) -> io::Result<u64> {
         #[derive(Deserialize)]
         struct OffsetRecord {
             offset: u64,
@@ -280,7 +294,24 @@ impl MessageLog {
             topic: commit_topic,
             partition: self.partition,
         };
-        let mut offset_log = MessageLog::new(&tp_offset, true, &self.base_dir)?;
+        let topic_map = self.topic_map.lock().await;
+        let index = match topic_map.get(&tp_offset) {
+            Some(index) => *index,
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Commit offset not available.",
+                ));
+            }
+        };
+        let log_dir = format!("{}/{}", self.base_dir, index);
+        let mut offset_log = MessageLog::new(
+            &tp_offset,
+            true,
+            &self.base_dir,
+            &log_dir,
+            self.topic_map.clone(),
+        )?;
         let offset_message = offset_log.get_message(0)?;
         let record: OffsetRecord = serde_json::from_slice(&offset_message.payload[..]).unwrap(); // XXX TODO Don't unwrap...
         Ok(record.offset)
@@ -288,28 +319,100 @@ impl MessageLog {
 }
 
 pub struct MessageLogManager {
-    logs: HashMap<TopicPartition, bool>,
+    logs: Arc<Mutex<HashMap<TopicPartition, u64>>>,
     base_dir: String,
+    max_index: u64,
 }
 
 impl MessageLogManager {
-    pub fn new(base_dir: &str) -> MessageLogManager {
-        MessageLogManager {
-            logs: HashMap::new(),
-            base_dir: base_dir.to_string(),
+    pub fn new(base_dir: &str) -> io::Result<MessageLogManager> {
+        let mut logs: HashMap<TopicPartition, u64> = HashMap::new();
+        let mut max_index = 0;
+        let index_name = format!("{}/topics.index", base_dir);
+        let f = match File::open(&index_name) {
+            Ok(f) => f,
+            Err(_) => File::create(&index_name)?,
+        };
+        let f = BufReader::new(f);
+        for line in f.lines() {
+            if let Ok(line) = line {
+                let vals: Vec<&str> = line.splitn(3, ':').collect();
+                if vals.len() == 3 {
+                    let topic = vals[2].to_string();
+                    let partition = match vals[1].parse::<u64>() {
+                        Ok(i) => i,
+                        Err(err) => {
+                            let msg =
+                                format!("Failed to parse partition from topic index: {}.", err);
+                            error!("{}", msg);
+                            return Err(io::Error::new(io::ErrorKind::Other, msg));
+                        }
+                    };
+                    let index = match vals[0].parse::<u64>() {
+                        Ok(i) => i,
+                        Err(err) => {
+                            let msg = format!("Failed to parse index from topic index: {}.", err);
+                            error!("{}", msg);
+                            return Err(io::Error::new(io::ErrorKind::Other, msg));
+                        }
+                    };
+                    let tp = TopicPartition { topic, partition };
+                    if index > max_index {
+                        max_index = index;
+                    }
+                    logs.insert(tp, index);
+                } else {
+                    let msg = format!("Invalid line in topic index: {}.", line);
+                    error!("{}", msg);
+                    return Err(io::Error::new(io::ErrorKind::Other, msg));
+                }
+            } else {
+                break;
+            }
         }
+        Ok(MessageLogManager {
+            logs: Arc::new(Mutex::new(logs)),
+            base_dir: base_dir.to_string(),
+            max_index,
+        })
     }
 
-    pub fn get_log_manager(
+    pub async fn get_message_log(
         &mut self,
         tp: &TopicPartition,
         single_record: bool,
     ) -> io::Result<MessageLog> {
-        //if logs.contains_key(&tp) {
-        // If it is in use this a critical error...
-        //}
-        let msg_log = MessageLog::new(tp, single_record, &self.base_dir)?;
-        self.logs.insert(tp.clone(), true);
+        let mut logs = self.logs.lock().await;
+        let index = match logs.get(tp) {
+            Some(index) => *index,
+            None => {
+                self.max_index += 1;
+                let index_name = format!("{}/topics.index", &self.base_dir);
+                let mut append = OpenOptions::new()
+                    .read(false)
+                    .write(true)
+                    .append(true)
+                    .create(true)
+                    .open(&index_name)?;
+                append.seek(SeekFrom::End(0))?;
+                let d = format!("{}:{}:{}\n", self.max_index, tp.partition, tp.topic);
+                append.write_all(d.as_bytes())?;
+                logs.insert(tp.clone(), self.max_index);
+                self.max_index
+            }
+        };
+        let msg_dir = format!("{}/{}", self.base_dir, index);
+        if let Err(err) = create_dir_all(msg_dir.clone()) {
+            error!("Unable to create log directory: {}- {}", msg_dir, err);
+            return Err(err);
+        }
+        let msg_log = MessageLog::new(
+            tp,
+            single_record,
+            &self.base_dir,
+            &msg_dir,
+            self.logs.clone(),
+        )?;
         Ok(msg_log)
     }
 }
