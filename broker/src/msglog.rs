@@ -16,6 +16,21 @@ use serde_json;
 use common::types::*;
 use common::util::*;
 
+trait ByteTrans<T: ByteTrans<T>> {
+    fn size() -> usize {
+        std::mem::size_of::<T>()
+    }
+
+    unsafe fn as_bytes(t: &T) -> &[u8] {
+        std::slice::from_raw_parts((t as *const T) as *const u8, T::size())
+    }
+
+    unsafe fn as_bytes_mut(t: &mut T) -> &mut [u8] {
+        std::slice::from_raw_parts_mut((t as *mut T) as *mut u8, T::size())
+    }
+}
+
+#[repr(C)]
 struct LogIndex {
     pub offset: u64,
     pub time: u128,
@@ -23,8 +38,8 @@ struct LogIndex {
     pub size: usize,
 }
 
-impl LogIndex {
-    fn empty() -> LogIndex {
+impl Default for LogIndex {
+    fn default() -> Self {
         LogIndex {
             offset: 0,
             time: 0,
@@ -32,19 +47,9 @@ impl LogIndex {
             size: 0,
         }
     }
-
-    fn size() -> usize {
-        std::mem::size_of::<LogIndex>()
-    }
-
-    unsafe fn as_bytes(&self) -> &[u8] {
-        std::slice::from_raw_parts((self as *const LogIndex) as *const u8, LogIndex::size())
-    }
-
-    unsafe fn as_bytes_mut(&mut self) -> &mut [u8] {
-        std::slice::from_raw_parts_mut((self as *mut LogIndex) as *mut u8, LogIndex::size())
-    }
 }
+
+impl ByteTrans<LogIndex> for LogIndex {}
 
 pub struct MessageChunk {
     pub file_name: String,
@@ -111,9 +116,9 @@ impl MessageLog {
 
         let offset = if idx_end > LogIndex::size() as u64 && !single_record {
             idx_read.seek(SeekFrom::Start(idx_end - LogIndex::size() as u64))?;
-            let mut idx = LogIndex::empty();
+            let mut idx = LogIndex::default();
             unsafe {
-                idx_read.read_exact(idx.as_bytes_mut())?;
+                idx_read.read_exact(LogIndex::as_bytes_mut(&mut idx))?;
             }
             idx.offset + 1
         } else {
@@ -164,7 +169,7 @@ impl MessageLog {
         // XXX Verify the entire message was written?
         self.log_end += (v.as_bytes().len() + message.payload_size) as u64;
         unsafe {
-            self.idx_append.write_all(idx.as_bytes())?;
+            self.idx_append.write_all(LogIndex::as_bytes(&idx))?;
         }
         if !self.single_record {
             self.offset += 1;
@@ -187,9 +192,9 @@ impl MessageLog {
         let pos = offset * std::mem::size_of::<LogIndex>() as u64;
         let mut idx_read = File::open(&self.log_file_idx_name)?;
         idx_read.seek(SeekFrom::Start(pos))?;
-        let mut idx = LogIndex::empty();
+        let mut idx = LogIndex::default();
         unsafe {
-            idx_read.read_exact(idx.as_bytes_mut())?;
+            idx_read.read_exact(LogIndex::as_bytes_mut(&mut idx))?;
         }
         Ok(idx)
     }
