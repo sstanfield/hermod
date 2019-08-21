@@ -31,16 +31,15 @@ trait ByteTrans<T: ByteTrans<T>> {
 }
 
 #[repr(C)]
-struct LogIndex {
+struct LogIdxNode {
     pub offset: u64,
     pub time: u128,
     pub position: u64,
     pub size: usize,
 }
-
-impl Default for LogIndex {
+impl Default for LogIdxNode {
     fn default() -> Self {
-        LogIndex {
+        LogIdxNode {
             offset: 0,
             time: 0,
             position: 0,
@@ -48,8 +47,29 @@ impl Default for LogIndex {
         }
     }
 }
+impl ByteTrans<LogIdxNode> for LogIdxNode {}
 
-impl ByteTrans<LogIndex> for LogIndex {}
+#[derive(Debug)]
+#[repr(C)]
+struct SegmentIdxNode {
+    segment: u32,
+    first_offset: u64,
+    first_time: u128,
+    last_offset: u64,
+    last_time: u128,
+}
+impl Default for SegmentIdxNode {
+    fn default() -> Self {
+        SegmentIdxNode {
+            segment: 0,
+            first_offset: 0,
+            first_time: 0,
+            last_offset: 0,
+            last_time: 0,
+        }
+    }
+}
+impl ByteTrans<SegmentIdxNode> for SegmentIdxNode {}
 
 pub struct MessageChunk {
     pub file_name: String,
@@ -81,6 +101,7 @@ pub struct MessageLog {
     partition: u64,
     base_dir: String,
     log_dir: String,
+    segments: Vec<SegmentIdxNode>,
     topic_map: Arc<Mutex<HashMap<TopicPartition, u64>>>,
 }
 
@@ -92,7 +113,39 @@ impl MessageLog {
         log_dir: &str,
         topic_map: Arc<Mutex<HashMap<TopicPartition, u64>>>,
     ) -> io::Result<MessageLog> {
-        let log_file_name = format!("{}/{}.{}.log", log_dir, tp.topic, tp.partition);
+        let segment_index_name = format!("{}/segments.index", log_dir);
+        let mut segments = Vec::with_capacity(10);
+        {
+            match File::open(&segment_index_name) {
+                Ok(mut f) => loop {
+                    let mut idx = SegmentIdxNode::default();
+                    unsafe {
+                        if f.read_exact(SegmentIdxNode::as_bytes_mut(&mut idx)).is_err() {
+                            break;
+                        }
+                    }
+                    segments.push(idx);
+                },
+                Err(_) => {
+                    let idx = SegmentIdxNode::default();
+                    let mut f = File::create(&segment_index_name)?;
+                    unsafe {
+                        f.write_all(SegmentIdxNode::as_bytes(&idx))?;
+                    }
+                    segments.push(idx);
+                }
+            }
+        }
+        if segments.is_empty() {
+            let msg = format!(
+                "Failed to get log segments (filesystem tampered with?) for {} / {}.",
+                tp.topic, tp.partition
+            );
+            error!("{}", msg);
+            return Err(io::Error::new(io::ErrorKind::Other, msg));
+        }
+        let segment_number = segments[segments.len() - 1].segment;
+        let log_file_name = format!("{}/{}.log", log_dir, segment_number);
         let mut log_append = OpenOptions::new()
             .read(false)
             .write(true)
@@ -103,7 +156,7 @@ impl MessageLog {
         let log_end = log_append.seek(SeekFrom::Current(0))?;
         let log_flushed_end = log_end;
 
-        let log_file_idx_name = format!("{}/{}.{}.idx", log_dir, tp.topic, tp.partition);
+        let log_file_idx_name = format!("{}/{}.idx", log_dir, segment_number);
         let mut idx_append = OpenOptions::new()
             .read(false)
             .write(true)
@@ -114,11 +167,11 @@ impl MessageLog {
         let idx_end = idx_append.seek(SeekFrom::Current(0))?;
         let mut idx_read = File::open(&log_file_idx_name)?;
 
-        let offset = if idx_end > LogIndex::size() as u64 && !single_record {
-            idx_read.seek(SeekFrom::Start(idx_end - LogIndex::size() as u64))?;
-            let mut idx = LogIndex::default();
+        let offset = if idx_end > LogIdxNode::size() as u64 && !single_record {
+            idx_read.seek(SeekFrom::Start(idx_end - LogIdxNode::size() as u64))?;
+            let mut idx = LogIdxNode::default();
             unsafe {
-                idx_read.read_exact(LogIndex::as_bytes_mut(&mut idx))?;
+                idx_read.read_exact(LogIdxNode::as_bytes_mut(&mut idx))?;
             }
             idx.offset + 1
         } else {
@@ -138,6 +191,7 @@ impl MessageLog {
             partition: tp.partition,
             base_dir: base_dir.to_string(),
             log_dir: log_dir.to_string(),
+            segments,
             topic_map,
         })
     }
@@ -160,7 +214,7 @@ impl MessageLog {
             Ok(n) => n.as_millis(),
             Err(_) => 0,
         };
-        let idx = LogIndex {
+        let idx = LogIdxNode {
             offset: message.sequence as u64,
             time,
             position: self.log_end,
@@ -169,7 +223,7 @@ impl MessageLog {
         // XXX Verify the entire message was written?
         self.log_end += (v.as_bytes().len() + message.payload_size) as u64;
         unsafe {
-            self.idx_append.write_all(LogIndex::as_bytes(&idx))?;
+            self.idx_append.write_all(LogIdxNode::as_bytes(&idx))?;
         }
         if !self.single_record {
             self.offset += 1;
@@ -188,13 +242,13 @@ impl MessageLog {
         Ok(())
     }
 
-    fn get_index(&self, offset: u64) -> io::Result<LogIndex> {
-        let pos = offset * std::mem::size_of::<LogIndex>() as u64;
+    fn get_index(&self, offset: u64) -> io::Result<LogIdxNode> {
+        let pos = offset * std::mem::size_of::<LogIdxNode>() as u64;
         let mut idx_read = File::open(&self.log_file_idx_name)?;
         idx_read.seek(SeekFrom::Start(pos))?;
-        let mut idx = LogIndex::default();
+        let mut idx = LogIdxNode::default();
         unsafe {
-            idx_read.read_exact(LogIndex::as_bytes_mut(&mut idx))?;
+            idx_read.read_exact(LogIdxNode::as_bytes_mut(&mut idx))?;
         }
         Ok(idx)
     }
