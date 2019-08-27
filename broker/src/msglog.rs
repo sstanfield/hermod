@@ -120,7 +120,9 @@ impl MessageLog {
                 Ok(mut f) => loop {
                     let mut idx = SegmentIdxNode::default();
                     unsafe {
-                        if f.read_exact(SegmentIdxNode::as_bytes_mut(&mut idx)).is_err() {
+                        if f.read_exact(SegmentIdxNode::as_bytes_mut(&mut idx))
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -231,14 +233,17 @@ impl MessageLog {
         Ok(())
     }
 
-    pub fn append(&mut self, message: &Message) -> io::Result<()> {
-        self.append_no_flush(message)?;
-        let flush = message.message_type != MessageType::BatchMessage || self.single_record;
-        if flush {
-            self.log_append.flush()?;
-            self.idx_append.flush()?;
-            self.log_flushed_end = self.log_end;
+    pub fn append(&mut self, messages: &mut Vec<Message>) -> io::Result<()> {
+        // XXX appending multiple messages vs one message seems to slow down
+        // the 1 pub case but speed up the 100 pub case.  Maybe get the IO into
+        // another thread pool with channels for data in and out.
+        for mut message in messages {
+            message.sequence = self.offset;
+            self.append_no_flush(&message)?;
         }
+        self.log_append.flush()?;
+        self.idx_append.flush()?;
+        self.log_flushed_end = self.log_end;
         Ok(())
     }
 
@@ -314,7 +319,6 @@ impl MessageLog {
                     let len = buf.len();
                     let payload = buf[len - payload_size..].to_vec();
                     Ok(Message {
-                        message_type: MessageType::Message,
                         topic,
                         partition: self.partition,
                         payload_size,

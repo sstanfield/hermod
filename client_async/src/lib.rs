@@ -378,7 +378,6 @@ impl Client {
         // XXX check that payload is not to large.
         let packet = ClientToServer::PublishMessage {
             message: Message {
-                message_type: MessageType::Message,
                 topic: topic.to_string(),
                 partition,
                 payload_size: payload.len(),

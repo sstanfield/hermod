@@ -1,22 +1,9 @@
 use bytes::{Bytes, BytesMut};
 use std::{fmt, io};
 
-/// Type of a message.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum MessageType {
-    /// Normal message.
-    Message,
-    /// Message that is part of a batch of messages.
-    BatchMessage,
-    /// Message that is the last of a batch, count if number of messages.
-    BatchEnd { count: usize },
-}
-
 /// Message, used within the client and server to contain message data.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Message {
-    /// Type of message (ie standalone or batch).
-    pub message_type: MessageType,
     /// Topic of the message.
     pub topic: String,
     /// Partition of the message.
@@ -77,10 +64,6 @@ impl fmt::Display for SubType {
 #[derive(Clone)]
 pub enum ClientToServer {
     StatusOk,
-    BatchCount {
-        count: usize,
-    },
-    Batch,
     Connect {
         client_name: String,
         group_id: String,
@@ -96,6 +79,9 @@ pub enum ClientToServer {
     },
     PublishMessage {
         message: Message,
+    },
+    PublishMessages {
+        messages: Vec<Message>,
     },
     Subscribe {
         topic: String,
@@ -170,7 +156,7 @@ pub enum EncodeStatus {
     Ok,
     /// Byte buffer did not have capacity to hold data, encoded data is returned in enum.
     BufferToSmall(Bytes),
-    /// The data that encoder was asked to encode is not valid (all ClientMessage types are not sent to client).
+    /// The data that encoder was asked to encode is not valid.
     Invalid,
 }
 

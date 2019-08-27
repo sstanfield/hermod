@@ -45,6 +45,7 @@ pub async fn client_incoming(
     client_decoder_factor: ProtocolServerDecoderFactory,
 ) {
     let mut decoder = client_decoder_factor();
+    //let buf_size = 1_024_000;
     let buf_size = 32000;
     let mut in_bytes = BytesMut::with_capacity(buf_size);
     in_bytes.resize(buf_size, 0);
@@ -79,6 +80,7 @@ pub async fn client_incoming(
                                     leftover_bytes = in_bytes.len();
                                 }
                             }
+                            Ok(Some(ClientToServer::Noop)) => decoding = true,
                             Ok(Some(incoming)) => {
                                 send!(
                                     message_incoming_tx,

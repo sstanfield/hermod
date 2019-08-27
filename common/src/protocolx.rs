@@ -140,6 +140,7 @@ pub struct ServerDecoder {
     in_batch: bool,
     batch_count: usize,
     expected_batch_count: usize,
+    message_batch: Option<Vec<Message>>,
 }
 
 impl Default for ServerDecoder {
@@ -149,6 +150,7 @@ impl Default for ServerDecoder {
             in_batch: false,
             batch_count: 0,
             expected_batch_count: 0,
+            message_batch: None,
         }
     }
 }
@@ -160,6 +162,7 @@ impl ServerDecoder {
             in_batch: false,
             batch_count: 0,
             expected_batch_count: 0,
+            message_batch: None,
         }
     }
 }
@@ -171,7 +174,6 @@ impl ProtocolServerDecoder for ServerDecoder {
             if let Some((first_brace, message_offset)) = find_brace(&buf[..]) {
                 buf.advance(first_brace);
                 let line = buf.split_to((message_offset - first_brace) + 1);
-                //println!("XXXX decoding: {}", String::from_utf8(line.to_vec()).unwrap());
                 let incoming: ServerIncoming = serde_json::from_slice(&line[..])?;
                 match incoming {
                     ServerIncoming::Publish {
@@ -180,22 +182,7 @@ impl ProtocolServerDecoder for ServerDecoder {
                         payload_size,
                         crc,
                     } => {
-                        let message_type = if self.in_batch {
-                            self.batch_count += 1;
-                            if self.batch_count == self.expected_batch_count {
-                                self.in_batch = false;
-                                self.batch_count = 0;
-                                let count = self.expected_batch_count;
-                                self.expected_batch_count = 0;
-                                MessageType::BatchEnd { count }
-                            } else {
-                                MessageType::BatchMessage
-                            }
-                        } else {
-                            MessageType::Message
-                        };
                         let message = Message {
-                            message_type,
                             topic,
                             partition,
                             payload_size,
@@ -208,30 +195,30 @@ impl ProtocolServerDecoder for ServerDecoder {
                     ServerIncoming::Batch { batch_type, count } => match batch_type {
                         BatchType::Start => {
                             self.in_batch = true;
-                            result = Ok(Some(ClientToServer::Batch));
+                            self.message_batch = Some(Vec::with_capacity(100));
+                            result = Ok(Some(ClientToServer::Noop));
                         }
                         BatchType::End => {
                             self.in_batch = false;
-                            result = Ok(Some(ClientToServer::PublishMessage {
-                                message: Message {
-                                    message_type: MessageType::BatchEnd {
-                                        count: self.batch_count,
-                                    },
-                                    topic: "".to_string(),
-                                    partition: 0,
-                                    payload_size: 0,
-                                    crc: 0,
-                                    sequence: 0,
-                                    payload: vec![],
-                                },
-                            }));
+                            let message_batch = std::mem::replace(&mut self.message_batch, None);
+                            if let Some(message_batch) = message_batch {
+                                result = Ok(Some(ClientToServer::PublishMessages {
+                                    messages: message_batch,
+                                }));
+                            } else {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::Other,
+                                    "No batch to send!",
+                                ));
+                            }
                             self.batch_count = 0;
                         }
                         BatchType::Count => {
                             self.in_batch = true;
                             self.batch_count = 0;
                             self.expected_batch_count = count;
-                            result = Ok(Some(ClientToServer::BatchCount { count }));
+                            self.message_batch = Some(Vec::with_capacity(count));
+                            result = Ok(Some(ClientToServer::Noop));
                         }
                     },
 
@@ -300,19 +287,39 @@ impl ProtocolServerDecoder for ServerDecoder {
                 }
             }
         }
-        if let Some(message) = &self.message {
-            let mut message = message.clone();
+        let message = std::mem::replace(&mut self.message, None);
+        if let Some(mut message) = message {
             if buf.len() >= message.payload_size {
                 message.payload = buf[..message.payload_size].to_vec();
                 buf.advance(message.payload_size);
-                self.message = None;
-                result = Ok(Some(ClientToServer::PublishMessage { message }));
+                if self.in_batch {
+                    if let Some(message_batch) = &mut self.message_batch {
+                        message_batch.push(message);
+                    }
+                    self.batch_count += 1;
+                    if self.batch_count == self.expected_batch_count {
+                        self.in_batch = false;
+                        self.batch_count = 0;
+                        self.expected_batch_count = 0;
+                        let message_batch = std::mem::replace(&mut self.message_batch, None);
+                        if let Some(messages) = message_batch {
+                            Ok(Some(ClientToServer::PublishMessages { messages }))
+                        } else {
+                            Err(io::Error::new(io::ErrorKind::Other, "No batch to send!"))
+                        }
+                    } else {
+                        Ok(Some(ClientToServer::Noop))
+                    }
+                } else {
+                    Ok(Some(ClientToServer::PublishMessage { message }))
+                }
             } else {
-                result = Ok(None);
+                self.message = Some(message);
+                Ok(None)
             }
+        } else {
+            result
         }
-
-        result
     }
 }
 
@@ -451,9 +458,7 @@ impl ProtocolClientDecoder for ClientDecoder {
                         crc,
                         sequence,
                     } => {
-                        let message_type = MessageType::Message;
                         let message = Message {
-                            message_type,
                             topic,
                             partition,
                             payload_size,
@@ -499,20 +504,16 @@ impl ProtocolClientDecoder for ClientDecoder {
                 }
             }
         }
-        let mut got_payload = false;
-        if let Some(message) = &self.message {
-            let mut message = message.clone();
+        let message = std::mem::replace(&mut self.message, None);
+        if let Some(mut message) = message {
             if buf.len() >= message.payload_size {
                 message.payload = buf[..message.payload_size].to_vec();
                 buf.advance(message.payload_size);
-                got_payload = true;
                 result = Ok(Some(ServerToClient::Message { message }));
             } else {
+                self.message = Some(message);
                 result = Ok(None);
             }
-        }
-        if got_payload {
-            self.message = None;
         }
         result
     }
@@ -637,8 +638,7 @@ impl ProtocolClientEncoder for ClientEncoder {
                 move_bytes(buf, bytes)
             }
             ClientToServer::ClientDisconnect => EncodeStatus::Invalid,
-            ClientToServer::Batch => EncodeStatus::Invalid,
-            ClientToServer::BatchCount { .. } => EncodeStatus::Invalid,
+            ClientToServer::PublishMessages { .. } => EncodeStatus::Invalid,
             ClientToServer::Noop => EncodeStatus::Invalid,
         }
     }

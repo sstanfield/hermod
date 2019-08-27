@@ -31,7 +31,6 @@ pub struct MessageCore {
     client_encoder: Box<dyn ProtocolServerEncoder>,
     writer: WriteHalf<TcpStream>,
     out_bytes: BytesMut,
-    message_batch: Option<Vec<Message>>,
 }
 
 impl MessageCore {
@@ -59,7 +58,6 @@ impl MessageCore {
             client_encoder,
             writer,
             out_bytes,
-            message_batch: None,
         }
     }
 
@@ -219,7 +217,6 @@ impl MessageCore {
             if let Ok(mut tx) = self.get_broker_tx(tp).await {
                 let payload = format!("{{\"offset\":{}}}", commit_offset).into_bytes();
                 let message = Message {
-                    message_type: MessageType::Message,
                     topic: commit_topic,
                     partition,
                     payload_size: payload.len(),
@@ -262,47 +259,38 @@ impl MessageCore {
     async fn publish_message(&mut self, message: Message) {
         if self.check_connected().await {
             let tp = TopicPartition {
-                partition: 0,
+                partition: message.partition,
                 topic: message.topic.clone(),
             };
-            let message_type = message.message_type;
-            match message_type {
-                MessageType::Message => {
-                    if message.payload_size > 0 {
-                        if let Ok(mut tx) = self.get_broker_tx(tp).await {
-                            if let Err(error) = tx.send(BrokerMessage::Message { message }).await {
-                                error!("Error sending to broker: {}", error);
-                                self.running = false;
-                            }
-                        }
+            if message.payload_size > 0 {
+                if let Ok(mut tx) = self.get_broker_tx(tp).await {
+                    if let Err(error) = tx.send(BrokerMessage::Message { message }).await {
+                        error!("Error sending to broker: {}", error);
+                        self.running = false;
                     }
-                    self.send(ServerToClient::StatusOk).await;
-                }
-                MessageType::BatchMessage => {
-                    // No feedback during a batch.
-                    if let Some(message_batch) = &mut self.message_batch {
-                        message_batch.push(message);
-                    }
-                }
-                MessageType::BatchEnd { count } => {
-                    let message_batch = std::mem::replace(&mut self.message_batch, None);
-                    if let Some(mut message_batch) = message_batch {
-                        message_batch.push(message);
-                        if let Ok(mut tx) = self.get_broker_tx(tp).await {
-                            if let Err(error) = tx
-                                .send(BrokerMessage::MessageBatch {
-                                    messages: message_batch,
-                                })
-                                .await
-                            {
-                                error!("Error sending to broker: {}", error);
-                                self.running = false;
-                            }
-                        }
-                    }
-                    self.send(ServerToClient::StatusOkCount { count }).await;
                 }
             }
+            self.send(ServerToClient::StatusOk).await;
+        }
+    }
+
+    async fn publish_messages(&mut self, messages: Vec<Message>) {
+        if messages.is_empty() {
+            return;
+        }
+        if self.check_connected().await {
+            let tp = TopicPartition {
+                partition: messages[0].partition,
+                topic: messages[0].topic.clone(),
+            };
+            let count = messages.len();
+            if let Ok(mut tx) = self.get_broker_tx(tp).await {
+                if let Err(error) = tx.send(BrokerMessage::MessageBatch { messages }).await {
+                    error!("Error sending to broker: {}", error);
+                    self.running = false;
+                }
+            }
+            self.send(ServerToClient::StatusOkCount { count }).await;
         }
     }
 
@@ -318,12 +306,6 @@ impl MessageCore {
 
     async fn handle_toserver_message(&mut self, message: ClientToServer) {
         match message {
-            ClientToServer::Batch => {
-                self.message_batch = Some(Vec::with_capacity(100));
-            }
-            ClientToServer::BatchCount { count } => {
-                self.message_batch = Some(Vec::with_capacity(count));
-            }
             ClientToServer::Connect {
                 client_name,
                 group_id,
@@ -371,6 +353,9 @@ impl MessageCore {
             }
             ClientToServer::PublishMessage { message } => {
                 self.publish_message(message).await;
+            }
+            ClientToServer::PublishMessages { messages } => {
+                self.publish_messages(messages).await;
             }
             ClientToServer::Fetch {
                 topic,

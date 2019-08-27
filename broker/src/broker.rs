@@ -161,7 +161,6 @@ impl BrokerManager {
                         digest.write(&payload);
                         let crc = digest.sum32();
                         let message = Message {
-                            message_type: MessageType::Message,
                             topic: "__topic_online".to_string(),
                             partition: 0,
                             payload_size: payload.len(),
@@ -290,16 +289,19 @@ async fn fetch_with_pos(
     bad_client
 }
 
-fn handle_message(
-    mut message: Message,
+fn handle_messages(
+    mut messages: Vec<Message>,
     tp: &TopicPartition,
     msg_log: &mut MessageLog,
     client_tx: &mut HashMap<String, ClientInfo>,
 ) {
-    message.sequence = msg_log.offset();
+    if messages.is_empty() {
+        return;
+    }
+    let offset = msg_log.offset();
 
-    if let Err(error) = msg_log.append(&message) {
-        error!("Failed to write message to log {}", error);
+    if let Err(error) = msg_log.append(&mut messages) {
+        error!("Failed to write messages to log {}", error);
         return;
     }
 
@@ -308,35 +310,36 @@ fn handle_message(
         let client = client_tx.get(tx_key).unwrap();
         let mut tx = client.tx.clone();
         let is_internal = client.is_internal;
-        let mut send_msg = true;
-        let message = if is_internal {
-            ClientMessage::ToClient(ServerToClient::InternalMessage {
-                message: message.clone(),
-            })
-        } else {
-            match client.sub_type {
-                SubType::Stream => ClientMessage::ToClient(ServerToClient::Message {
+        if is_internal {
+            for message in &messages {
+                let m = ClientMessage::ToClient(ServerToClient::InternalMessage {
                     message: message.clone(),
-                }),
-                SubType::Fetch => {
-                    if !client.needs_fetch.get()
-                        && message.message_type != MessageType::BatchMessage
-                    {
-                        client.needs_fetch.set(true);
-                    } else {
-                        send_msg = false;
-                    }
-                    ClientMessage::ToClient(ServerToClient::MessagesAvailable {
-                        topic: tp.topic.clone(),
-                        partition: tp.partition,
-                    })
+                });
+                if let Err(err) = tx.try_send(m) {
+                    error!("Error writing to client, will close. {}", err);
+                    bad_clients.push(tx_key.clone());
                 }
             }
-        };
-        if send_msg {
-            if let Err(err) = tx.try_send(message) {
-                error!("Error writing to client, will close. {}", err);
-                bad_clients.push(tx_key.clone());
+        } else {
+            match client.sub_type {
+                SubType::Stream => {
+                    if !fetch(offset, &msg_log, &mut tx, &client.group_id) {
+                        bad_clients.push(tx_key.clone());
+                    }
+                }
+                SubType::Fetch => {
+                    if !client.needs_fetch.get() {
+                        client.needs_fetch.set(true);
+                        let message = ClientMessage::ToClient(ServerToClient::MessagesAvailable {
+                            topic: tp.topic.clone(),
+                            partition: tp.partition,
+                        });
+                        if let Err(err) = tx.try_send(message) {
+                            error!("Error writing to client, will close. {}", err);
+                            bad_clients.push(tx_key.clone());
+                        }
+                    }
+                }
             }
         }
     }
@@ -364,15 +367,15 @@ async fn new_message_broker(
     let mut client_tx: HashMap<String, ClientInfo> = HashMap::new();
     let mut message = rx.next().await;
     while message.is_some() && running {
-        let mes = message.clone().unwrap();
-        match mes {
+        let mes = message.take();
+        match mes.unwrap() {
             BrokerMessage::Message { message } => {
-                handle_message(message, &tp, &mut msg_log, &mut client_tx);
+                let mut messages: Vec<Message> = Vec::with_capacity(1);
+                messages.push(message);
+                handle_messages(messages, &tp, &mut msg_log, &mut client_tx);
             }
             BrokerMessage::MessageBatch { messages } => {
-                for message in messages {
-                    handle_message(message, &tp, &mut msg_log, &mut client_tx);
-                }
+                handle_messages(messages, &tp, &mut msg_log, &mut client_tx);
             }
             BrokerMessage::NewClient {
                 client_name,
