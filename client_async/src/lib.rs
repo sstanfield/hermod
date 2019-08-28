@@ -378,11 +378,12 @@ impl Client {
         // XXX check that payload is not to large.
         let packet = ClientToServer::PublishMessage {
             message: Message {
-                topic: topic.to_string(),
-                partition,
-                payload_size: payload.len(),
+                tp: TopicPartition {
+                    topic: topic.to_string(),
+                    partition,
+                },
                 crc,
-                sequence: 0,
+                offset: 0,
                 payload: Vec::from(payload),
             },
         };
@@ -433,7 +434,7 @@ impl Client {
                 match client_message {
                     ServerToClient::Message { message } => {
                         self.decoding = true;
-                        self.last_offset = message.sequence;
+                        self.last_offset = message.offset;
                         let mut digest = crc32::Digest::new(crc32::IEEE);
                         digest.write(&message.payload);
                         let crc = digest.sum32();

@@ -161,11 +161,12 @@ impl BrokerManager {
                         digest.write(&payload);
                         let crc = digest.sum32();
                         let message = Message {
-                            topic: "__topic_online".to_string(),
-                            partition: 0,
-                            payload_size: payload.len(),
+                            tp: TopicPartition {
+                                topic: "__topic_online".to_string(),
+                                partition: 0,
+                            },
                             crc,
-                            sequence: 0,
+                            offset: 0,
                             payload,
                         };
                         if let Err(error) = topic_online_tx

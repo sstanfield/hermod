@@ -199,9 +199,10 @@ impl MessageLog {
     }
 
     fn append_no_flush(&mut self, message: &Message) -> io::Result<()> {
-        let v = format!(
+        let v =
+            format!(
             "{{\"Message\":{{\"topic\":\"{}\",\"payload_size\":{},\"crc\":{},\"sequence\":{}}}}}",
-            message.topic, message.payload_size, message.crc, message.sequence
+            message.tp.topic, message.payload.len(), message.crc, message.offset
         );
         if self.single_record {
             // XXX need to truncate here?  Probably does not matter.
@@ -217,13 +218,13 @@ impl MessageLog {
             Err(_) => 0,
         };
         let idx = LogIdxNode {
-            offset: message.sequence as u64,
+            offset: message.offset as u64,
             time,
             position: self.log_end,
-            size: v.as_bytes().len() + message.payload_size,
+            size: v.as_bytes().len() + message.payload.len(),
         };
         // XXX Verify the entire message was written?
-        self.log_end += (v.as_bytes().len() + message.payload_size) as u64;
+        self.log_end += (v.as_bytes().len() + message.payload.len()) as u64;
         unsafe {
             self.idx_append.write_all(LogIdxNode::as_bytes(&idx))?;
         }
@@ -238,7 +239,7 @@ impl MessageLog {
         // the 1 pub case but speed up the 100 pub case.  Maybe get the IO into
         // another thread pool with channels for data in and out.
         for mut message in messages {
-            message.sequence = self.offset;
+            message.offset = self.offset;
             self.append_no_flush(&message)?;
         }
         self.log_append.flush()?;
@@ -319,11 +320,12 @@ impl MessageLog {
                     let len = buf.len();
                     let payload = buf[len - payload_size..].to_vec();
                     Ok(Message {
-                        topic,
-                        partition: self.partition,
-                        payload_size,
+                        tp: TopicPartition {
+                            topic,
+                            partition: self.partition,
+                        },
                         crc,
-                        sequence,
+                        offset: sequence,
                         payload,
                     })
                 }

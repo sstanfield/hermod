@@ -136,6 +136,7 @@ fn move_bytes(buf: &mut BytesMut, bytes: &[u8]) -> EncodeStatus {
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ServerDecoder {
+    payload_size: usize,
     message: Option<Message>,
     in_batch: bool,
     batch_count: usize,
@@ -146,6 +147,7 @@ pub struct ServerDecoder {
 impl Default for ServerDecoder {
     fn default() -> Self {
         ServerDecoder {
+            payload_size: 0,
             message: None,
             in_batch: false,
             batch_count: 0,
@@ -158,6 +160,7 @@ impl Default for ServerDecoder {
 impl ServerDecoder {
     pub fn new() -> ServerDecoder {
         ServerDecoder {
+            payload_size: 0,
             message: None,
             in_batch: false,
             batch_count: 0,
@@ -183,13 +186,12 @@ impl ProtocolServerDecoder for ServerDecoder {
                         crc,
                     } => {
                         let message = Message {
-                            topic,
-                            partition,
-                            payload_size,
+                            tp: TopicPartition { topic, partition },
                             crc,
-                            sequence: 0,
+                            offset: 0,
                             payload: vec![],
                         };
+                        self.payload_size = payload_size;
                         self.message = Some(message);
                     }
                     ServerIncoming::Batch { batch_type, count } => match batch_type {
@@ -289,9 +291,9 @@ impl ProtocolServerDecoder for ServerDecoder {
         }
         let message = std::mem::replace(&mut self.message, None);
         if let Some(mut message) = message {
-            if buf.len() >= message.payload_size {
-                message.payload = buf[..message.payload_size].to_vec();
-                buf.advance(message.payload_size);
+            if buf.len() >= self.payload_size {
+                message.payload = buf[..self.payload_size].to_vec();
+                buf.advance(message.payload.len());
                 if self.in_batch {
                     if let Some(message_batch) = &mut self.message_batch {
                         message_batch.push(message);
@@ -361,10 +363,11 @@ impl ProtocolServerEncoder for ServerEncoder {
             }
             ServerToClient::Message { message } => {
                 let v = format!("{{\"Message\":{{\"topic\":\"{}\",\"payload_size\":{},\"crc\":{},\"sequence\":{}}}}}",
-                                   message.topic, message.payload_size, message.crc, message.sequence);
+                                   message.tp.topic, message.payload.len(), message.crc, message.offset);
                 let bytes = v.as_bytes();
-                if (bytes.len() + message.payload_size) > buf.remaining_mut() {
-                    let mut new_bytes = BytesMut::with_capacity(bytes.len() + message.payload_size);
+                if (bytes.len() + message.payload.len()) > buf.remaining_mut() {
+                    let mut new_bytes =
+                        BytesMut::with_capacity(bytes.len() + message.payload.len());
                     new_bytes.put_slice(bytes);
                     new_bytes.put_slice(&message.payload);
                     EncodeStatus::BufferToSmall(new_bytes.freeze())
@@ -432,12 +435,16 @@ enum ClientIncoming {
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 struct ClientDecoder {
+    payload_size: usize,
     message: Option<Message>,
 }
 
 impl ClientDecoder {
     pub fn new() -> ClientDecoder {
-        ClientDecoder { message: None }
+        ClientDecoder {
+            payload_size: 0,
+            message: None,
+        }
     }
 }
 
@@ -459,13 +466,12 @@ impl ProtocolClientDecoder for ClientDecoder {
                         sequence,
                     } => {
                         let message = Message {
-                            topic,
-                            partition,
-                            payload_size,
+                            tp: TopicPartition { topic, partition },
                             crc,
-                            sequence,
+                            offset: sequence,
                             payload: vec![],
                         };
+                        self.payload_size = payload_size;
                         self.message = Some(message);
                     }
                     ClientIncoming::Status {
@@ -506,9 +512,9 @@ impl ProtocolClientDecoder for ClientDecoder {
         }
         let message = std::mem::replace(&mut self.message, None);
         if let Some(mut message) = message {
-            if buf.len() >= message.payload_size {
-                message.payload = buf[..message.payload_size].to_vec();
-                buf.advance(message.payload_size);
+            if buf.len() >= self.payload_size {
+                message.payload = buf[..self.payload_size].to_vec();
+                buf.advance(message.payload.len());
                 result = Ok(Some(ServerToClient::Message { message }));
             } else {
                 self.message = Some(message);
@@ -599,11 +605,12 @@ impl ProtocolClientEncoder for ClientEncoder {
             ClientToServer::PublishMessage { message } => {
                 let v = format!(
                     "{{\"Publish\": {{\"topic\": \"{}\", \"partition\": {}, \"payload_size\": {}, \"crc\": {}}}}}",
-                    message.topic, message.partition, message.payload_size, message.crc
+                    message.tp.topic, message.tp.partition, message.payload.len(), message.crc
                 );
                 let bytes = v.as_bytes();
-                if (bytes.len() + message.payload_size) > buf.remaining_mut() {
-                    let mut new_bytes = BytesMut::with_capacity(bytes.len() + message.payload_size);
+                if (bytes.len() + message.payload.len()) > buf.remaining_mut() {
+                    let mut new_bytes =
+                        BytesMut::with_capacity(bytes.len() + message.payload.len());
                     new_bytes.put_slice(bytes);
                     new_bytes.put_slice(&message.payload);
                     EncodeStatus::BufferToSmall(new_bytes.freeze())

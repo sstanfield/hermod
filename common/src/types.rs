@@ -4,16 +4,12 @@ use std::{fmt, io};
 /// Message, used within the client and server to contain message data.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Message {
-    /// Topic of the message.
-    pub topic: String,
-    /// Partition of the message.
-    pub partition: u64,
-    /// Size of the payload in bytes.
-    pub payload_size: usize,
-    /// SHA-1 of the message payload.
+    /// Topic and partition of the message.
+    pub tp: TopicPartition,
+    /// CRC32 of the message payload.
     pub crc: u32,
-    /// Message sequence number.
-    pub sequence: u64,
+    /// Message offset number.
+    pub offset: u64,
     /// Raw bytes of the payload.
     pub payload: Vec<u8>,
 }

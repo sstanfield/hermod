@@ -217,11 +217,12 @@ impl MessageCore {
             if let Ok(mut tx) = self.get_broker_tx(tp).await {
                 let payload = format!("{{\"offset\":{}}}", commit_offset).into_bytes();
                 let message = Message {
-                    topic: commit_topic,
-                    partition,
-                    payload_size: payload.len(),
+                    tp: TopicPartition {
+                        topic: commit_topic,
+                        partition,
+                    },
                     crc: 0,
-                    sequence: 0,
+                    offset: 0,
                     payload,
                 };
                 if let Err(error) = tx.send(BrokerMessage::Message { message }).await {
@@ -258,12 +259,8 @@ impl MessageCore {
 
     async fn publish_message(&mut self, message: Message) {
         if self.check_connected().await {
-            let tp = TopicPartition {
-                partition: message.partition,
-                topic: message.topic.clone(),
-            };
-            if message.payload_size > 0 {
-                if let Ok(mut tx) = self.get_broker_tx(tp).await {
+            if !message.payload.is_empty() {
+                if let Ok(mut tx) = self.get_broker_tx(message.tp.clone()).await {
                     if let Err(error) = tx.send(BrokerMessage::Message { message }).await {
                         error!("Error sending to broker: {}", error);
                         self.running = false;
@@ -278,13 +275,11 @@ impl MessageCore {
         if messages.is_empty() {
             return;
         }
+        // XXX If we loop over messages and send each like publish message then
+        // the one pub case gets faster but everything else gets slower...
         if self.check_connected().await {
-            let tp = TopicPartition {
-                partition: messages[0].partition,
-                topic: messages[0].topic.clone(),
-            };
             let count = messages.len();
-            if let Ok(mut tx) = self.get_broker_tx(tp).await {
+            if let Ok(mut tx) = self.get_broker_tx(messages[0].tp.clone()).await {
                 if let Err(error) = tx.send(BrokerMessage::MessageBatch { messages }).await {
                     error!("Error sending to broker: {}", error);
                     self.running = false;

@@ -59,9 +59,9 @@ async fn run_consumer(client: &mut Client, config: &Config) -> io::Result<()> {
                     "Message loopy: {}",
                     String::from_utf8(message.payload).unwrap()
                 );*/
-                if message.sequence % 100 == 0 {
+                if message.offset % 100 == 0 {
                     client
-                        .commit_offset(&config.topic, 0, message.sequence)
+                        .commit_offset(&config.topic, 0, message.offset)
                         .await
                         .unwrap();
                 }
