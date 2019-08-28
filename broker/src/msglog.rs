@@ -233,7 +233,7 @@ impl MessageLog {
         Ok(())
     }
 
-    pub fn append(&mut self, messages: &mut Vec<Message>) -> io::Result<()> {
+    pub fn append(&mut self, messages: &mut [Message]) -> io::Result<()> {
         // XXX appending multiple messages vs one message seems to slow down
         // the 1 pub case but speed up the 100 pub case.  Maybe get the IO into
         // another thread pool with channels for data in and out.
