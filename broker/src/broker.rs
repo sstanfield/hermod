@@ -8,7 +8,6 @@ use std::time::Duration;
 use futures::channel::mpsc;
 use futures::executor::ThreadPool;
 use futures::lock::Mutex;
-use futures::sink::SinkExt;
 use futures::task::SpawnExt;
 use futures::StreamExt;
 
@@ -16,7 +15,6 @@ use super::msglog::*;
 use common::types::*;
 use common::util::*;
 
-use crc::{crc32, Hasher32};
 use log::{error, info};
 
 struct ClientInfo {
@@ -85,31 +83,6 @@ impl BrokerManager {
         })
     }
 
-    pub async fn expand_topics(&self, topic_name: String) -> Vec<String> {
-        let mut result = Vec::<String>::new();
-        if topic_name.trim().ends_with('*') {
-            let len = topic_name.len();
-            let data = self.brokers.lock().await;
-            if data.is_shutdown {
-                return result;
-            }
-            if len == 1 {
-                for key in data.brokers.keys() {
-                    result.push(key.topic.clone());
-                }
-            } else {
-                for key in data.brokers.keys() {
-                    if key.topic.starts_with(&topic_name[..len - 1]) {
-                        result.push(key.topic.clone());
-                    }
-                }
-            }
-        } else {
-            result.push(topic_name);
-        }
-        result
-    }
-
     pub async fn get_broker_tx(
         &self,
         tp: TopicPartition,
@@ -126,8 +99,7 @@ impl BrokerManager {
         }
         let (tx, rx) = mpsc::channel::<BrokerMessage>(1000);
         data.brokers.insert(tp.clone(), tx.clone());
-        let is_single_record =
-            tp.topic.starts_with("__consumer_offsets") || tp.topic.starts_with("__topic_online");
+        let is_single_record = tp.topic.starts_with("__consumer_offsets");
         match data
             .log_manager
             .get_message_log(&tp, is_single_record)
@@ -146,37 +118,6 @@ impl BrokerManager {
                     );
                     Err(())
                 } else {
-                    let online_tp = TopicPartition {
-                        topic: "__topic_online".to_string(),
-                        partition: 0,
-                    };
-                    if data.brokers.contains_key(&online_tp) {
-                        let mut topic_online_tx = data.brokers.get(&online_tp).unwrap().clone();
-                        let payload = format!(
-                            "{{\"partition\": {}, \"topic\": \"{}\"}}",
-                            tp.partition, tp.topic
-                        )
-                        .into_bytes();
-                        let mut digest = crc32::Digest::new(crc32::IEEE);
-                        digest.write(&payload);
-                        let crc = digest.sum32();
-                        let message = Message {
-                            tp: TopicPartition {
-                                topic: "__topic_online".to_string(),
-                                partition: 0,
-                            },
-                            crc,
-                            offset: 0,
-                            payload,
-                        };
-                        if let Err(error) = topic_online_tx
-                            .send(BrokerMessage::Message { message })
-                            .await
-                        {
-                            error!("Error sending to broker: {}", error);
-                        }
-                    }
-
                     Ok(tx.clone())
                 }
             }

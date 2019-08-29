@@ -316,18 +316,8 @@ impl MessageCore {
                 sub_type,
             } => {
                 if self.check_connected().await {
-                    for topic in self.broker_manager.expand_topics(topic).await {
-                        self.new_client(partition, topic, position, sub_type, false)
-                            .await;
-                    }
-                    self.new_client(
-                        0,
-                        "__topic_online".to_string(),
-                        TopicPosition::Latest,
-                        SubType::Stream,
-                        true,
-                    )
-                    .await;
+                    self.new_client(partition, topic, position, sub_type, false)
+                        .await;
                     self.send(ServerToClient::StatusOk).await;
                 }
             }
