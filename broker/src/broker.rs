@@ -21,7 +21,6 @@ struct ClientInfo {
     tx: mpsc::Sender<ClientMessage>,
     group_id: String,
     sub_type: SubType,
-    is_internal: bool,
     needs_fetch: Cell<bool>,
 }
 
@@ -37,7 +36,6 @@ pub enum BrokerMessage {
         client_name: String,
         group_id: String,
         tx: mpsc::Sender<ClientMessage>,
-        is_internal: bool,
     },
     FetchPolicy {
         client_name: String,
@@ -231,19 +229,6 @@ async fn fetch_with_pos(
     bad_client
 }
 
-fn proc_internal(messages: &[Message], tx: &mut mpsc::Sender<ClientMessage>) -> bool {
-    for message in messages {
-        let m = ClientMessage::ToClient(ServerToClient::InternalMessage {
-            message: message.clone(),
-        });
-        if let Err(err) = tx.try_send(m) {
-            error!("Error writing to client, will close. {}", err);
-            return false;
-        }
-    }
-    true
-}
-
 fn handle_messages(
     messages: &mut [Message],
     tp: &TopicPartition,
@@ -264,29 +249,22 @@ fn handle_messages(
     for tx_key in client_tx.keys() {
         let client = client_tx.get(tx_key).unwrap();
         let mut tx = client.tx.clone();
-        let is_internal = client.is_internal;
-        if is_internal {
-            if !proc_internal(messages, &mut tx) {
-                bad_clients.push(tx_key.clone());
-            }
-        } else {
-            match client.sub_type {
-                SubType::Stream => {
-                    if !fetch(offset, &msg_log, &mut tx, &client.group_id) {
-                        bad_clients.push(tx_key.clone());
-                    }
+        match client.sub_type {
+            SubType::Stream => {
+                if !fetch(offset, &msg_log, &mut tx, &client.group_id) {
+                    bad_clients.push(tx_key.clone());
                 }
-                SubType::Fetch => {
-                    if !client.needs_fetch.get() {
-                        client.needs_fetch.set(true);
-                        let message = ClientMessage::ToClient(ServerToClient::MessagesAvailable {
-                            topic: tp.topic.clone(),
-                            partition: tp.partition,
-                        });
-                        if let Err(err) = tx.try_send(message) {
-                            error!("Error writing to client, will close. {}", err);
-                            bad_clients.push(tx_key.clone());
-                        }
+            }
+            SubType::Fetch => {
+                if !client.needs_fetch.get() {
+                    client.needs_fetch.set(true);
+                    let message = ClientMessage::ToClient(ServerToClient::MessagesAvailable {
+                        topic: tp.topic.clone(),
+                        partition: tp.partition,
+                    });
+                    if let Err(err) = tx.try_send(message) {
+                        error!("Error writing to client, will close. {}", err);
+                        bad_clients.push(tx_key.clone());
                     }
                 }
             }
@@ -331,7 +309,6 @@ async fn new_message_broker(
                 client_name,
                 group_id,
                 tx,
-                is_internal,
             } => {
                 client_tx.insert(
                     client_name.to_string(),
@@ -339,7 +316,6 @@ async fn new_message_broker(
                         tx: tx.clone(),
                         group_id,
                         sub_type: SubType::Fetch,
-                        is_internal,
                         needs_fetch: Cell::new(true),
                     },
                 );

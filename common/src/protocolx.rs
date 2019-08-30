@@ -386,7 +386,6 @@ impl ProtocolServerEncoder for ServerEncoder {
                 move_bytes(buf, bytes)
             }
 
-            ServerToClient::InternalMessage { .. } => EncodeStatus::Invalid,
             ServerToClient::MessageBatch { .. } => EncodeStatus::Invalid,
             ServerToClient::Over => EncodeStatus::Invalid,
             ServerToClient::Noop => EncodeStatus::Invalid,

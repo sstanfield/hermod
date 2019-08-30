@@ -113,9 +113,6 @@ pub enum ServerToClient {
         code: u32,
         message: String,
     },
-    InternalMessage {
-        message: Message,
-    },
     Message {
         message: Message,
     },

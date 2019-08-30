@@ -152,7 +152,6 @@ impl MessageCore {
         topic: String,
         position: TopicPosition,
         sub_type: SubType,
-        internal: bool,
     ) {
         let tp = TopicPartition {
             partition,
@@ -164,7 +163,6 @@ impl MessageCore {
                     client_name: self.client_name.to_string(),
                     group_id: self.group_id.clone().unwrap(),
                     tx: self.broker_tx.clone(),
-                    is_internal: internal,
                 })
                 .await
             {
@@ -316,8 +314,7 @@ impl MessageCore {
                 sub_type,
             } => {
                 if self.check_connected().await {
-                    self.new_client(partition, topic, position, sub_type, false)
-                        .await;
+                    self.new_client(partition, topic, position, sub_type).await;
                     self.send(ServerToClient::StatusOk).await;
                 }
             }
@@ -369,7 +366,6 @@ impl MessageCore {
             ServerToClient::StatusOk => {
                 self.send(ServerToClient::StatusOk).await;
             }
-            ServerToClient::InternalMessage { .. } => {}
             ServerToClient::Message { message } => {
                 self.send(ServerToClient::Message { message }).await;
             }
