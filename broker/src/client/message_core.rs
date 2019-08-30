@@ -188,6 +188,27 @@ impl MessageCore {
         }
     }
 
+    async fn unsubscribe(&mut self, partition: u64, topic: String) {
+        let tp = TopicPartition {
+            partition,
+            topic: topic.clone(),
+        };
+        if let Ok(mut tx) = self.get_broker_tx(tp).await {
+            if let Err(err) = tx
+                .send(BrokerMessage::CloseClient {
+                    client_name: self.client_name.to_string(),
+                })
+                .await
+            {
+                error!("Error sending message to broker, close client: {}", err);
+                self.running = false;
+            }
+        } else {
+            error!("Error tx for broker, closing client!");
+            self.running = false;
+        }
+    }
+
     async fn check_connected(&mut self) -> bool {
         if self.group_id.is_none() {
             self.send(ServerToClient::StatusError {
@@ -318,9 +339,11 @@ impl MessageCore {
                     self.send(ServerToClient::StatusOk).await;
                 }
             }
-            ClientToServer::Unsubscribe { .. } => {
-                // XXX implement... topic: _ } => {
-                self.send(ServerToClient::StatusOk).await;
+            ClientToServer::Unsubscribe { topic, partition } => {
+                if self.check_connected().await {
+                    self.unsubscribe(partition, topic).await;
+                    self.send(ServerToClient::StatusOk).await;
+                }
             }
             ClientToServer::ClientDisconnect => {
                 info!("Client close request.");
