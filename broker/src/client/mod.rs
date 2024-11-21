@@ -4,13 +4,9 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use futures::channel::mpsc;
-use futures::executor::ThreadPool;
-use futures::io::AsyncReadExt;
 use futures::lock::Mutex;
-use futures::task::SpawnExt;
-use futures::StreamExt;
 
-use romio::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream};
 
 use super::broker::*;
 use common::types::*;
@@ -75,32 +71,26 @@ impl ClientManager {
 }
 
 pub async fn start_client(
-    mut threadpool: ThreadPool,
     client_manager: Arc<ClientManager>,
     broker_manager: Arc<BrokerManager>,
     decoder_factory: ProtocolServerDecoderFactory,
     encoder_factory: ProtocolServerEncoderFactory,
     bind_addr: SocketAddr,
 ) {
-    match TcpListener::bind(&bind_addr) {
-        Ok(mut listener) => {
-            let mut incoming = listener.incoming();
-
+    match TcpListener::bind(&bind_addr).await {
+        Ok(listener) => {
             info!("Client listening on {}", bind_addr);
             let mut connections = 0;
 
-            while let Some(stream) = incoming.next().await {
-                threadpool
-                    .spawn(new_client(
-                        stream.unwrap(),
-                        connections,
-                        Arc::clone(&client_manager),
-                        broker_manager.clone(),
-                        threadpool.clone(),
-                        decoder_factory,
-                        encoder_factory,
-                    ))
-                    .unwrap();
+            while let Ok((stream, _peer_addr)) = listener.accept().await {
+                tokio::task::spawn(new_client(
+                    stream,
+                    connections,
+                    Arc::clone(&client_manager),
+                    broker_manager.clone(),
+                    decoder_factory,
+                    encoder_factory,
+                ));
                 connections += 1;
             }
         }
@@ -115,19 +105,16 @@ async fn new_client(
     idx: u64,
     client_manager: Arc<ClientManager>,
     broker_manager: Arc<BrokerManager>,
-    mut threadpool: ThreadPool,
     decoder_factory: ProtocolServerDecoderFactory,
     encoder_factory: ProtocolServerEncoderFactory,
 ) {
     client_manager.inc_clients().await;
     let addr = stream.peer_addr().unwrap();
-    let (reader, writer) = stream.split();
+    let (reader, writer) = stream.into_split();
     info!("Accepting sub stream from: {}", addr);
     let (broker_tx, rx) = mpsc::channel::<ClientMessage>(1000);
     // Do this so when message_incoming completes client_incoming is dropped and the connection closes.
-    let _client = threadpool
-        .spawn_with_handle(client_incoming(broker_tx.clone(), reader, decoder_factory))
-        .unwrap();
+    tokio::task::spawn(client_incoming(broker_tx.clone(), reader, decoder_factory));
     let client_name_unique = format!("Client_{}:{}", idx, addr);
     let mut mc = MessageCore::new(
         broker_tx,

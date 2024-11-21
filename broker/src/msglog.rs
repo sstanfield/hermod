@@ -11,6 +11,7 @@ use futures::lock::Mutex;
 
 use log::{error, info};
 
+use serde_derive::Deserialize;
 use serde_json;
 
 use common::types::*;
@@ -30,6 +31,7 @@ trait ByteTrans<T: ByteTrans<T>> {
     }
 }
 
+#[derive(Default)]
 #[repr(C)]
 struct LogIdxNode {
     pub offset: u64,
@@ -37,19 +39,9 @@ struct LogIdxNode {
     pub position: u64,
     pub size: usize,
 }
-impl Default for LogIdxNode {
-    fn default() -> Self {
-        LogIdxNode {
-            offset: 0,
-            time: 0,
-            position: 0,
-            size: 0,
-        }
-    }
-}
 impl ByteTrans<LogIdxNode> for LogIdxNode {}
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 #[repr(C)]
 struct SegmentIdxNode {
     segment: u32,
@@ -57,17 +49,6 @@ struct SegmentIdxNode {
     first_time: u128,
     last_offset: u64,
     last_time: u128,
-}
-impl Default for SegmentIdxNode {
-    fn default() -> Self {
-        SegmentIdxNode {
-            segment: 0,
-            first_offset: 0,
-            first_time: 0,
-            last_offset: 0,
-            last_time: 0,
-        }
-    }
 }
 impl ByteTrans<SegmentIdxNode> for SegmentIdxNode {}
 
@@ -100,8 +81,6 @@ pub struct MessageLog {
     topic: String,
     partition: u64,
     base_dir: String,
-    log_dir: String,
-    segments: Vec<SegmentIdxNode>,
     topic_map: Arc<Mutex<HashMap<TopicPartition, u64>>>,
 }
 
@@ -150,23 +129,21 @@ impl MessageLog {
         let log_file_name = format!("{}/{}.log", log_dir, segment_number);
         let mut log_append = OpenOptions::new()
             .read(false)
-            .write(true)
             .append(true)
             .create(true)
             .open(&log_file_name)?;
         log_append.seek(SeekFrom::End(0))?;
-        let log_end = log_append.seek(SeekFrom::Current(0))?;
+        let log_end = log_append.stream_position()?;
         let log_flushed_end = log_end;
 
         let log_file_idx_name = format!("{}/{}.idx", log_dir, segment_number);
         let mut idx_append = OpenOptions::new()
             .read(false)
-            .write(true)
             .append(true)
             .create(true)
             .open(&log_file_idx_name)?;
         idx_append.seek(SeekFrom::End(0))?;
-        let idx_end = idx_append.seek(SeekFrom::Current(0))?;
+        let idx_end = idx_append.stream_position()?;
         let mut idx_read = File::open(&log_file_idx_name)?;
 
         let offset = if idx_end > LogIdxNode::size() as u64 && !single_record {
@@ -192,8 +169,6 @@ impl MessageLog {
             topic: tp.topic.clone(),
             partition: tp.partition,
             base_dir: base_dir.to_string(),
-            log_dir: log_dir.to_string(),
-            segments,
             topic_map,
         })
     }
@@ -218,7 +193,7 @@ impl MessageLog {
             Err(_) => 0,
         };
         let idx = LogIdxNode {
-            offset: message.offset as u64,
+            offset: message.offset,
             time,
             position: self.log_end,
             size: v.as_bytes().len() + message.payload.len(),
@@ -238,9 +213,9 @@ impl MessageLog {
         // XXX appending multiple messages vs one message seems to slow down
         // the 1 pub case but speed up the 100 pub case.  Maybe get the IO into
         // another thread pool with channels for data in and out.
-        for mut message in messages {
+        for message in messages {
             message.offset = self.offset;
-            self.append_no_flush(&message)?;
+            self.append_no_flush(message)?;
         }
         self.log_append.flush()?;
         self.idx_append.flush()?;
@@ -264,12 +239,11 @@ impl MessageLog {
 
         match index {
             Ok(index) => {
-                let mut result = Vec::with_capacity(1);
-                result.push(MessageChunk {
+                let result = vec![MessageChunk {
                     file_name: self.log_file_name.clone(),
                     start_position: index.position,
                     length: self.log_flushed_end - index.position,
-                });
+                }];
                 Some(result)
             }
             Err(error) => {
@@ -455,7 +429,6 @@ impl MessageLogManager {
                 let index_name = format!("{}/topics.index", &self.base_dir);
                 let mut append = OpenOptions::new()
                     .read(false)
-                    .write(true)
                     .append(true)
                     .create(true)
                     .open(&index_name)?;

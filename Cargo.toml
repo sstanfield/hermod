@@ -1,8 +1,4 @@
 [workspace]
+resolver = "2"
 
-members = [
-    "broker",
-    "common",
-    "client_async",
-    "test_client",
-]
+members = ["broker", "common", "client_async", "test_client"]

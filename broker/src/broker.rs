@@ -6,9 +6,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use futures::channel::mpsc;
-use futures::executor::ThreadPool;
 use futures::lock::Mutex;
-use futures::task::SpawnExt;
 use futures::StreamExt;
 
 use super::msglog::*;
@@ -54,7 +52,6 @@ pub enum BrokerMessage {
 
 struct BrokerData {
     brokers: HashMap<TopicPartition, mpsc::Sender<BrokerMessage>>,
-    threadpool: ThreadPool,
     is_shutdown: bool,
     log_manager: MessageLogManager,
 }
@@ -65,7 +62,7 @@ pub struct BrokerManager {
 }
 
 impl BrokerManager {
-    pub fn new(threadpool: ThreadPool, log_dir: &str) -> io::Result<BrokerManager> {
+    pub fn new(log_dir: &str) -> io::Result<BrokerManager> {
         let log_dir = log_dir.to_string();
         let log_manager = MessageLogManager::new(&log_dir)?;
         let count = Arc::new(Mutex::new(0));
@@ -73,7 +70,6 @@ impl BrokerManager {
         Ok(BrokerManager {
             brokers: Mutex::new(BrokerData {
                 brokers: hm,
-                threadpool,
                 is_shutdown: false,
                 log_manager,
             }),
@@ -104,20 +100,13 @@ impl BrokerManager {
             .await
         {
             Ok(msg_log) => {
-                if let Err(err) = data.threadpool.spawn(new_message_broker(
+                tokio::task::spawn(new_message_broker(
                     rx,
                     tp.clone(),
                     msg_log,
                     self.count.clone(),
-                )) {
-                    error!(
-                        "Got error spawning task for partion {}, topic {}, error: {}",
-                        partition, topic, err
-                    );
-                    Err(())
-                } else {
-                    Ok(tx.clone())
-                }
+                ));
+                Ok(tx.clone())
             }
             Err(err) => {
                 error!(
@@ -207,23 +196,23 @@ async fn fetch_with_pos(
     let mut bad_client = false;
     match position {
         TopicPosition::Earliest => {
-            bad_client = !fetch(0, &msg_log, &mut client.tx, &client_name);
+            bad_client = !fetch(0, msg_log, &mut client.tx, client_name);
         }
         TopicPosition::Latest => {}
         TopicPosition::Current => match msg_log.get_committed_offset(&client.group_id).await {
             Ok(offset) => {
-                bad_client = !fetch(offset + 1, &msg_log, &mut client.tx, &client_name);
+                bad_client = !fetch(offset + 1, msg_log, &mut client.tx, client_name);
             }
             Err(err) => {
                 info!(
                     "Issue retrieving consumer offset (probably not committed): {}, using 0.",
                     err
                 );
-                bad_client = !fetch(0, &msg_log, &mut client.tx, &client_name);
+                bad_client = !fetch(0, msg_log, &mut client.tx, client_name);
             }
         },
         TopicPosition::Offset { offset } => {
-            bad_client = !fetch(offset, &msg_log, &mut client.tx, &client_name);
+            bad_client = !fetch(offset, msg_log, &mut client.tx, client_name);
         }
     }
     bad_client
@@ -251,7 +240,7 @@ fn handle_messages(
         let mut tx = client.tx.clone();
         match client.sub_type {
             SubType::Stream => {
-                if !fetch(offset, &msg_log, &mut tx, &client.group_id) {
+                if !fetch(offset, msg_log, &mut tx, &client.group_id) {
                     bad_clients.push(tx_key.clone());
                 }
             }
@@ -303,7 +292,7 @@ async fn new_message_broker(
                 single_message.pop();
             }
             BrokerMessage::MessageBatch { mut messages } => {
-                handle_messages(&mut messages, &tp, &mut msg_log, &mut client_tx);
+                handle_messages(&mut messages[..], &tp, &mut msg_log, &mut client_tx);
             }
             BrokerMessage::NewClient {
                 client_name,
@@ -325,7 +314,7 @@ async fn new_message_broker(
                 sub_type,
                 position,
             } => {
-                if let Some(mut client) = client_tx.get_mut(&client_name) {
+                if let Some(client) = client_tx.get_mut(&client_name) {
                     client.sub_type = sub_type;
                     if sub_type == SubType::Stream {
                         let bad_client =

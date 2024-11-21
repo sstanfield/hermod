@@ -1,7 +1,4 @@
-#![feature(async_await)]
-
 use client_async::*;
-use futures::executor;
 use log::{error, info, Level, LevelFilter, Metadata, Record};
 use std::io;
 use std::time::SystemTime;
@@ -133,33 +130,32 @@ async fn run_publisher(client: &mut Client, config: &Config) -> io::Result<()> {
     Ok(())
 }
 
-fn main() -> io::Result<()> {
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> io::Result<()> {
     log::set_logger(&LOGGER)
         .map(|()| log::set_max_level(LevelFilter::Info))
         .unwrap();
 
-    if let Ok(config) = get_config() {
+    if let Some(config) = get_config() {
         println!(
             "Name: {}, group: {}, topic: {}, client: {}",
             config.name, config.group, config.topic, config.is_client
         );
 
-        executor::block_on(async {
-            let mut client = Client::connect(
-                config.remote,
-                config.name.clone(),
-                config.group.clone(),
-                client_decoder_factory,
-                client_encoder_factory,
-            )
-            .await
-            .unwrap();
-            if config.is_client {
-                run_consumer(&mut client, &config).await
-            } else {
-                run_publisher(&mut client, &config).await
-            }
-        })
+        let mut client = Client::connect(
+            config.remote,
+            config.name.clone(),
+            config.group.clone(),
+            client_decoder_factory,
+            client_encoder_factory,
+        )
+        .await
+        .unwrap();
+        if config.is_client {
+            run_consumer(&mut client, &config).await
+        } else {
+            run_publisher(&mut client, &config).await
+        }
     } else {
         Ok(())
     }

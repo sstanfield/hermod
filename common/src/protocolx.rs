@@ -1,6 +1,8 @@
 use std::{fmt, io, str};
 
+use bytes::Buf;
 use bytes::{BufMut, Bytes, BytesMut};
+use serde_derive::Deserialize;
 
 use super::types::*;
 use super::util::*;
@@ -127,6 +129,7 @@ enum ServerIncoming {
 
 fn move_bytes(buf: &mut BytesMut, bytes: &[u8]) -> EncodeStatus {
     if bytes.len() > buf.remaining_mut() {
+        let bytes: Vec<u8> = bytes.to_vec();
         EncodeStatus::BufferToSmall(Bytes::from(bytes))
     } else {
         buf.put_slice(bytes);
@@ -134,7 +137,7 @@ fn move_bytes(buf: &mut BytesMut, bytes: &[u8]) -> EncodeStatus {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
 pub struct ServerDecoder {
     payload_size: usize,
     message: Option<Message>,
@@ -142,19 +145,6 @@ pub struct ServerDecoder {
     batch_count: usize,
     expected_batch_count: usize,
     message_batch: Option<Vec<Message>>,
-}
-
-impl Default for ServerDecoder {
-    fn default() -> Self {
-        ServerDecoder {
-            payload_size: 0,
-            message: None,
-            in_batch: false,
-            batch_count: 0,
-            expected_batch_count: 0,
-            message_batch: None,
-        }
-    }
 }
 
 impl ServerDecoder {
@@ -202,7 +192,7 @@ impl ProtocolServerDecoder for ServerDecoder {
                         }
                         BatchType::End => {
                             self.in_batch = false;
-                            let message_batch = std::mem::replace(&mut self.message_batch, None);
+                            let message_batch = self.message_batch.take();
                             if let Some(message_batch) = message_batch {
                                 result = Ok(Some(ClientToServer::PublishMessages {
                                     messages: message_batch,
@@ -289,7 +279,7 @@ impl ProtocolServerDecoder for ServerDecoder {
                 }
             }
         }
-        let message = std::mem::replace(&mut self.message, None);
+        let message = self.message.take();
         if let Some(mut message) = message {
             if buf.len() >= self.payload_size {
                 message.payload = buf[..self.payload_size].to_vec();
@@ -303,7 +293,7 @@ impl ProtocolServerDecoder for ServerDecoder {
                         self.in_batch = false;
                         self.batch_count = 0;
                         self.expected_batch_count = 0;
-                        let message_batch = std::mem::replace(&mut self.message_batch, None);
+                        let message_batch = self.message_batch.take();
                         if let Some(messages) = message_batch {
                             Ok(Some(ClientToServer::PublishMessages { messages }))
                         } else {
@@ -509,7 +499,7 @@ impl ProtocolClientDecoder for ClientDecoder {
                 }
             }
         }
-        let message = std::mem::replace(&mut self.message, None);
+        let message = self.message.take();
         if let Some(mut message) = message {
             if buf.len() >= self.payload_size {
                 message.payload = buf[..self.payload_size].to_vec();

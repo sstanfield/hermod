@@ -32,17 +32,17 @@ fn version() {
     println!("{}", VERSION_STRING);
 }
 
-fn get_arg(exe_name: &str, args: &mut Vec<OsString>) -> Result<String, ()> {
+fn get_arg(exe_name: &str, args: &mut Vec<OsString>) -> Option<String> {
     if let Some(argument) = args.pop() {
         if let Ok(arg) = argument.into_string() {
-            return Ok(arg);
+            return Some(arg);
         }
     }
     help(exe_name);
-    Err(())
+    None
 }
 
-pub fn get_config() -> Result<Config, ()> {
+pub fn get_config() -> Option<Config> {
     let mut bind: SocketAddr = "127.0.0.1:7878".parse().unwrap();
     let mut log_dir = "logs".to_string();
 
@@ -70,7 +70,7 @@ pub fn get_config() -> Result<Config, ()> {
                         Err(err) => {
                             println!("Invalid server socket, {}!", err);
                             help(&exe_name);
-                            return Err(());
+                            return None;
                         }
                     },
                     "-l" | "--logdir" => {
@@ -78,20 +78,20 @@ pub fn get_config() -> Result<Config, ()> {
                     }
                     "-v" | "--version" => {
                         version();
-                        return Err(());
+                        return None;
                     }
                     "-h" | "--help" => {
                         help(&exe_name);
-                        return Err(());
+                        return None;
                     }
                     _ => {
                         help(&exe_name);
-                        return Err(());
+                        return None;
                     }
                 }
             } else {
                 help(&exe_name);
-                return Err(());
+                return None;
             }
         }
     }
@@ -100,7 +100,7 @@ pub fn get_config() -> Result<Config, ()> {
     }
     if let Err(err) = create_dir_all(log_dir.clone()) {
         println!("Unable to create log directory: {}- {}", log_dir, err);
-        return Err(());
+        return None;
     }
-    Ok(Config { bind, log_dir })
+    Some(Config { bind, log_dir })
 }

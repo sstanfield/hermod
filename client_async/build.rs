@@ -4,7 +4,7 @@ use std::process::Command;
 use chrono::prelude::Utc;
 
 #[cfg(debug_assertions)]
-const BUILD_TYPE: &'static str = "debug";
+const BUILD_TYPE: &str = "debug";
 #[cfg(not(debug_assertions))]
 const BUILD_TYPE: &'static str = "release";
 

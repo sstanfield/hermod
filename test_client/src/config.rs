@@ -49,17 +49,17 @@ fn version() {
     println!("{}", VERSION_STRING);
 }
 
-fn get_arg(exe_name: &str, args: &mut Vec<OsString>) -> Result<String, ()> {
+fn get_arg(exe_name: &str, args: &mut Vec<OsString>) -> Option<String> {
     if let Some(argument) = args.pop() {
         if let Ok(arg) = argument.into_string() {
-            return Ok(arg);
+            return Some(arg);
         }
     }
     help(exe_name);
-    Err(())
+    None
 }
 
-pub fn get_config() -> Result<Config, ()> {
+pub fn get_config() -> Option<Config> {
     let mut name = "test_client".to_string();
     let mut group = "g1".to_string();
     let mut topic = "top1".to_string();
@@ -104,7 +104,7 @@ pub fn get_config() -> Result<Config, ()> {
                         Err(err) => {
                             println!("Invalid server socket, {}!", err);
                             help(&exe_name);
-                            return Err(());
+                            return None;
                         }
                     },
                     "-n" | "--name" => {
@@ -114,9 +114,7 @@ pub fn get_config() -> Result<Config, ()> {
                         group = get_arg(&exe_name, &mut args)?;
                     }
                     "--count" => {
-                        count = get_arg(&exe_name, &mut args)?
-                            .parse::<usize>()
-                            .map_err(|_| ())?;
+                        count = get_arg(&exe_name, &mut args)?.parse::<usize>().ok()?;
                     }
                     "--base_message" => {
                         base_message = get_arg(&exe_name, &mut args)?;
@@ -132,7 +130,7 @@ pub fn get_config() -> Result<Config, ()> {
                     }
                     "-v" | "--version" => {
                         version();
-                        return Err(());
+                        return None;
                     }
                     "--stream" => {
                         fetch = false;
@@ -145,20 +143,20 @@ pub fn get_config() -> Result<Config, ()> {
                     }
                     "-h" | "--help" => {
                         help(&exe_name);
-                        return Err(());
+                        return None;
                     }
                     _ => {
                         help(&exe_name);
-                        return Err(());
+                        return None;
                     }
                 }
             } else {
                 help(&exe_name);
-                return Err(());
+                return None;
             }
         }
     }
-    Ok(Config {
+    Some(Config {
         name,
         group,
         topic,

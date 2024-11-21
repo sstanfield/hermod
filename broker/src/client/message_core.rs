@@ -1,5 +1,3 @@
-extern crate libc;
-
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom};
@@ -9,11 +7,10 @@ use std::sync::Arc;
 use bytes::{BufMut, BytesMut};
 
 use futures::channel::mpsc;
-use futures::io::{AsyncWriteExt, WriteHalf};
-use futures::sink::SinkExt;
-use futures::StreamExt;
 
-use romio::TcpStream;
+use futures::{SinkExt, StreamExt};
+use tokio::io::AsyncWriteExt;
+use tokio::net::tcp::OwnedWriteHalf;
 
 use super::super::broker::*;
 use common::types::*;
@@ -29,7 +26,7 @@ pub struct MessageCore {
     group_id: Option<String>,
     running: bool,
     client_encoder: Box<dyn ProtocolServerEncoder>,
-    writer: WriteHalf<TcpStream>,
+    writer: OwnedWriteHalf,
     out_bytes: BytesMut,
 }
 
@@ -40,7 +37,7 @@ impl MessageCore {
         client_name_unique: &str,
         broker_manager: Arc<BrokerManager>,
         encoder_factory: ProtocolServerEncoderFactory,
-        writer: WriteHalf<TcpStream>,
+        writer: OwnedWriteHalf,
     ) -> MessageCore {
         let client_encoder = encoder_factory();
         let broker_tx_cache: HashMap<TopicPartition, mpsc::Sender<BrokerMessage>> = HashMap::new();

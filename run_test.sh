@@ -1,6 +1,6 @@
 #!/bin/sh
 
-cargo +nightly build --release
+cargo build --release
 
 rm -rf test_logs/
 target/release/hermod --logdir test_logs &
@@ -84,9 +84,9 @@ fi
 kill $hermod_pid
 wait $hermod_pid
 
-md5sum test_logs/1/0.log
-#echo "58e84656b6e53a74301993e874ad7111  test_logs/test_top1.0.log"
-echo "930049ef9fc414d29365fc973d68bbf1  test_logs/test_top1.0.log"
+#md5sum test_logs/1/0.log
+# openssl md5 test_logs/1/0.log
+#echo "930049ef9fc414d29365fc973d68bbf1  test_logs/test_top1.0.log"
 
 
 

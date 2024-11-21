@@ -1,11 +1,10 @@
-use std::str;
+use std::{io, str};
 
 use bytes::BytesMut;
 use futures::channel::mpsc;
-use futures::io::{AsyncReadExt, ReadHalf};
 use futures::sink::SinkExt;
 
-use romio::TcpStream;
+use tokio::net::tcp::OwnedReadHalf;
 
 use common::types::*;
 
@@ -41,7 +40,7 @@ macro_rules! send {
 
 pub async fn client_incoming(
     mut message_incoming_tx: mpsc::Sender<ClientMessage>,
-    mut reader: ReadHalf<TcpStream>,
+    reader: OwnedReadHalf,
     client_decoder_factor: ProtocolServerDecoderFactory,
 ) {
     let mut decoder = client_decoder_factor();
@@ -63,58 +62,61 @@ pub async fn client_incoming(
             .await;
             continue;
         }
-        match reader.read(&mut in_bytes[leftover_bytes..]).await {
-            Ok(bytes) => {
-                if bytes == 0 {
-                    info!("No bytes read, closing client.");
-                    cont = false;
-                } else {
-                    in_bytes.truncate(leftover_bytes + bytes);
-                    leftover_bytes = 0;
-                    let mut decoding = true;
-                    while decoding && cont {
-                        decoding = false;
-                        match decoder.decode(&mut in_bytes) {
-                            Ok(None) => {
-                                if !in_bytes.is_empty() {
-                                    leftover_bytes = in_bytes.len();
+        if reader.readable().await.is_ok() {
+            match reader.try_read(&mut in_bytes[leftover_bytes..]) {
+                Ok(bytes) => {
+                    if bytes == 0 {
+                        info!("No bytes read, closing client.");
+                        cont = false;
+                    } else {
+                        in_bytes.truncate(leftover_bytes + bytes);
+                        leftover_bytes = 0;
+                        let mut decoding = true;
+                        while decoding && cont {
+                            decoding = false;
+                            match decoder.decode(&mut in_bytes) {
+                                Ok(None) => {
+                                    if !in_bytes.is_empty() {
+                                        leftover_bytes = in_bytes.len();
+                                    }
+                                }
+                                Ok(Some(ClientToServer::Noop)) => decoding = true,
+                                Ok(Some(incoming)) => {
+                                    send!(
+                                        message_incoming_tx,
+                                        ClientMessage::ToServer(incoming),
+                                        cont,
+                                        "Error sending client message, closing connection!"
+                                    );
+                                    decoding = true;
+                                }
+                                Err(error) => {
+                                    error!(
+                                        "Error decoding client message, closing connection: {}",
+                                        error
+                                    );
+                                    cont = false;
+                                    send_client_error(
+                                        message_incoming_tx.clone(),
+                                        501,
+                                        "Invalid data, closing connection!",
+                                    )
+                                    .await;
                                 }
                             }
-                            Ok(Some(ClientToServer::Noop)) => decoding = true,
-                            Ok(Some(incoming)) => {
-                                send!(
-                                    message_incoming_tx,
-                                    ClientMessage::ToServer(incoming),
-                                    cont,
-                                    "Error sending client message, closing connection!"
-                                );
-                                decoding = true;
-                            }
-                            Err(error) => {
-                                error!(
-                                    "Error decoding client message, closing connection: {}",
-                                    error
-                                );
-                                cont = false;
-                                send_client_error(
-                                    message_incoming_tx.clone(),
-                                    501,
-                                    "Invalid data, closing connection!",
-                                )
-                                .await;
-                            }
+                        }
+                        // Reclaim the entire buffer and copy leftover bytes to front.
+                        in_bytes.reserve(buf_size - in_bytes.len());
+                        unsafe {
+                            in_bytes.set_len(buf_size);
                         }
                     }
-                    // Reclaim the entire buffer and copy leftover bytes to front.
-                    in_bytes.reserve(buf_size - in_bytes.len());
-                    unsafe {
-                        in_bytes.set_len(buf_size);
-                    }
                 }
-            }
-            Err(_) => {
-                error!("Error reading client, closing connection");
-                cont = false;
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(_) => {
+                    error!("Error reading client, closing connection");
+                    cont = false;
+                }
             }
         }
     }

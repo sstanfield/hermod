@@ -1,17 +1,16 @@
-#![feature(async_await)]
-
 use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
 
 use bytes::{BufMut, BytesMut};
-use futures::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 
-use crc::{crc32, Hasher32};
+use crc::CRC_32_CKSUM;
 use log::error;
-use romio::TcpStream;
 
 use common::types::*;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::TcpStream;
 
 pub const HERMOD_API_VERSION: &str = env!("VERSION_STRING");
 
@@ -27,8 +26,8 @@ macro_rules! write_client {
 
 pub struct Client {
     remote: SocketAddr,
-    reader: ReadHalf<TcpStream>,
-    writer: WriteHalf<TcpStream>,
+    reader: OwnedReadHalf,
+    writer: OwnedWriteHalf,
     codec: Box<dyn ProtocolClientDecoder>,
     encoder: Box<dyn ProtocolClientEncoder>,
     buf_size: usize,
@@ -173,7 +172,7 @@ impl Client {
         let mut scratch_bytes = BytesMut::with_capacity(4096);
         let leftover_bytes = 0;
         let stream = TcpStream::connect(&remote).await?;
-        let (reader, mut writer) = stream.split();
+        let (reader, mut writer) = stream.into_split();
         write_client!(
             encoder,
             writer,
@@ -218,7 +217,7 @@ impl Client {
         self.scratch_bytes.truncate(0);
         self.leftover_bytes = 0;
         let stream = TcpStream::connect(&self.remote).await?;
-        let (reader, writer) = stream.split();
+        let (reader, writer) = stream.into_split();
         self.reader = reader;
         self.writer = writer;
         write_client!(
@@ -372,9 +371,11 @@ impl Client {
     }
 
     pub async fn publish(&mut self, topic: &str, partition: u64, payload: &[u8]) -> io::Result<()> {
-        let mut digest = crc32::Digest::new(crc32::IEEE);
-        digest.write(payload);
-        let crc = digest.sum32();
+        let crc = crc::Crc::<u32>::new(&CRC_32_CKSUM);
+        let mut digest = crc.digest();
+        //let mut digest = crc32::Digest::new(crc32::IEEE);
+        digest.update(payload);
+        let crc = digest.finalize();
         // XXX check that payload is not to large.
         let packet = ClientToServer::PublishMessage {
             message: Message {
@@ -435,9 +436,11 @@ impl Client {
                     ServerToClient::Message { message } => {
                         self.decoding = true;
                         self.last_offset = message.offset;
-                        let mut digest = crc32::Digest::new(crc32::IEEE);
-                        digest.write(&message.payload);
-                        let crc = digest.sum32();
+                        let crc = crc::Crc::<u32>::new(&CRC_32_CKSUM);
+                        let mut digest = crc.digest();
+                        //let mut digest = crc32::Digest::new(crc32::IEEE);
+                        digest.update(&message.payload);
+                        let crc = digest.finalize();
                         return if crc == message.crc {
                             Ok(message)
                         } else {
